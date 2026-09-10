@@ -17,6 +17,7 @@ import { HeirProbeResponder, heirProbe } from '../net/heir-probe.js';
 import { Failover, type FailoverAction } from '../election/failover.js';
 import { SignalingClient } from './client.js';
 import { SignalingServer } from './server.js';
+import { SfuMediaPlane } from '../sfu/media-plane.js';
 import { encodeRoomCode } from '../room/room-code.js';
 import type { MediaBody } from '../../shared/ipc.js';
 import type { RoomParams, RosterEntry, StreamInfo } from '../../shared/protocol.js';
@@ -40,6 +41,11 @@ export interface PeerNodeOptions {
   readonly resolveExternalEndpoint?: (
     port: number,
   ) => Promise<{ family: 'ipv4' | 'ipv6'; address: string; port: number }>;
+  /** when set, a promoted node runs an SFU too (docs/DESIGN.md 3.6) */
+  readonly sfu?: {
+    readonly videoBitrateKbps: number;
+    readonly announceIp?: () => string | undefined;
+  };
   readonly heartbeatIntervalMs?: number;
   readonly heartbeatMaxMissed?: number;
   readonly staggerMs?: number;
@@ -65,6 +71,7 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
   readonly #opts: PeerNodeOptions;
   #client: SignalingClient | undefined;
   #server: SignalingServer | undefined;
+  #mediaPlane: SfuMediaPlane | undefined;
   #responder: HeirProbeResponder | undefined;
   #bareListener: Server | undefined;
   #failover: Failover | undefined;
@@ -98,11 +105,21 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
     return this.#roomParams;
   }
   get streams(): StreamInfo[] {
+    if (this.#isHost) return this.#mediaPlane?.listStreams() ?? [];
     return this.#client?.streams ?? [];
   }
 
   /** Send a media negotiation body to the current host's SFU. */
   sendMedia(body: MediaBody): void {
+    if (this.#isHost && this.#mediaPlane) {
+      void this.#mediaPlane
+        .handleMessage(this.#peerId, body)
+        .then((reply) => {
+          if (reply) this.emit('media', reply);
+        })
+        .catch((err) => this.emit('error', err as Error));
+      return;
+    }
     this.#client?.send(body);
   }
 
@@ -132,6 +149,7 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
     this.#expectClose = true;
     this.#client?.close('leaving');
     if (this.#server) await this.#server.close();
+    this.#mediaPlane?.close();
     this.#responder?.close();
     await new Promise<void>((resolve) => {
       if (!this.#bareListener) return resolve();
@@ -271,6 +289,16 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
       this.#bareListener = undefined;
     });
 
+    let media: SfuMediaPlane | undefined;
+    if (this.#opts.sfu) {
+      const announceIp = this.#opts.sfu.announceIp?.();
+      media = new SfuMediaPlane({
+        videoBitrateKbps: this.#opts.sfu.videoBitrateKbps,
+        ...(announceIp ? { announceIp } : {}),
+      });
+      this.#mediaPlane = media;
+    }
+
     const server = new SignalingServer({
       roomId: this.#opts.roomId,
       w: this.#opts.w,
@@ -281,6 +309,7 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
       epoch,
       hostPeerId: this.#peerId,
       verifyInbound: true,
+      ...(media ? { media } : {}),
       ...(this.#opts.heartbeatIntervalMs
         ? { heartbeatIntervalMs: this.#opts.heartbeatIntervalMs }
         : {}),
@@ -288,6 +317,17 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
         ? { heartbeatMaxMissed: this.#opts.heartbeatMaxMissed }
         : {}),
     });
+    if (media) {
+      const plane = media;
+      plane.attachBroadcast((body) => {
+        server.broadcast(body);
+        this.emit('media', body);
+      });
+      plane.attachSendTo((peerId, body) => {
+        if (peerId === server.hostPeerId) this.emit('media', body);
+        else server.sendTo(peerId, body);
+      });
+    }
     server.on('error', (err) => this.emit('error', err));
     const syncRoster = () => {
       this.#roster = server.roster;

@@ -176,7 +176,7 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
 function Room({ snap }: { snap: SessionSnapshot }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | undefined>(undefined);
-  const media = useMedia(snap.streams);
+  const media = useMedia(snap.streams, snap.epoch);
 
   const copy = useCallback(() => {
     if (!snap.code) return;

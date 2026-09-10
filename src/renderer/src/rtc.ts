@@ -42,13 +42,15 @@ export interface MediaEngine {
   isSubscribed(streamId: string): boolean;
 }
 
-export function useMedia(streams: StreamInfo[]): MediaEngine {
+export function useMedia(streams: StreamInfo[], epoch: number): MediaEngine {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const localIdRef = useRef<string | null>(null);
   const publishStreamRef = useRef<MediaStream | null>(null);
   const publishPc = useRef<RTCPeerConnection | null>(null);
   const [publishIdle, setPublishIdle] = useState(false);
   const subPcs = useRef<Map<string, RTCPeerConnection>>(new Map());
+  /** which owners we intend to watch - survives a failover (peerIds are stable) */
+  const wantedOwners = useRef<Set<string>>(new Set());
   const [remote, setRemote] = useState<Map<string, MediaStream>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
@@ -99,25 +101,43 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
     setLocalStream(stream);
   }, [unpublish]);
 
-  const unsubscribe = useCallback(
+  const teardownSub = useCallback(
     (streamId: string) => {
-      window.erros.sendMedia({ type: 'unsubscribe', streamId });
       subPcs.current.get(streamId)?.close();
       subPcs.current.delete(streamId);
       setRemoteStream(streamId, null);
-      rerender();
     },
     [setRemoteStream],
   );
 
-  const subscribe = useCallback(async (streamId: string) => {
+  const startSub = useCallback((streamId: string) => {
     if (subPcs.current.has(streamId)) return;
-    setError(null);
-    // placeholder PC so a double click doesn't double-subscribe
+    // placeholder PC so a double request doesn't double-subscribe
     subPcs.current.set(streamId, new RTCPeerConnection());
     rerender();
     window.erros.sendMedia({ type: 'subscribe', streamId });
   }, []);
+
+  const unsubscribe = useCallback(
+    (streamId: string) => {
+      const owner = streams.find((s) => s.streamId === streamId)?.ownerPeerId;
+      if (owner) wantedOwners.current.delete(owner);
+      window.erros.sendMedia({ type: 'unsubscribe', streamId });
+      teardownSub(streamId);
+      rerender();
+    },
+    [streams, teardownSub],
+  );
+
+  const subscribe = useCallback(
+    async (streamId: string) => {
+      const owner = streams.find((s) => s.streamId === streamId)?.ownerPeerId;
+      if (owner) wantedOwners.current.add(owner);
+      setError(null);
+      startSub(streamId);
+    },
+    [streams, startSub],
+  );
 
   // handle media events from the main process
   useEffect(() => {
@@ -219,17 +239,44 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
     }
   }, [setRemoteStream, unpublish]);
 
-  // if a stream we watch disappears from the roster list, drop it
+  // reconcile subscriptions with the live stream list + our watch intent.
+  // this is what re-subscribes after a failover: the owner peerIds are stable,
+  // the streamIds change, so we follow the owner to its new stream.
   useEffect(() => {
     const live = new Set(streams.map((s) => s.streamId));
-    for (const id of subPcs.current.keys()) {
-      if (!live.has(id)) {
-        subPcs.current.get(id)?.close();
-        subPcs.current.delete(id);
-        setRemoteStream(id, null);
-      }
+    const byOwner = new Map(streams.map((s) => [s.ownerPeerId, s.streamId]));
+
+    // drop PCs whose stream is gone
+    for (const id of [...subPcs.current.keys()]) {
+      if (!live.has(id)) teardownSub(id);
     }
-  }, [streams, setRemoteStream]);
+    // for every owner we want to watch, make sure we're on their current stream
+    for (const owner of wantedOwners.current) {
+      const streamId = byOwner.get(owner);
+      if (!streamId) continue;
+      const already = [...subPcs.current.keys()].some(
+        (id) => streams.find((s) => s.streamId === id)?.ownerPeerId === owner,
+      );
+      if (!already) startSub(streamId);
+    }
+  }, [streams, teardownSub, startSub]);
+
+  // on a host change (epoch bump) every PC points at a dead SFU - reset and
+  // re-publish; the reconcile effect above re-subscribes.
+  const prevEpoch = useRef(epoch);
+  useEffect(() => {
+    if (epoch === prevEpoch.current) return;
+    prevEpoch.current = epoch;
+    for (const id of [...subPcs.current.keys()]) teardownSub(id);
+    const stream = publishStreamRef.current;
+    const stillLive = stream?.getTracks().some((t) => t.readyState === 'live');
+    publishPc.current?.close();
+    publishPc.current = null;
+    localIdRef.current = null;
+    setPublishIdle(false);
+    if (stream && stillLive) void publish(stream);
+    rerender();
+  }, [epoch, teardownSub, publish]);
 
   // periodic stats_report to the host's governor
   useEffect(() => {

@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { createServer } from 'node:net';
+import {
+  MediaStreamTrack,
+  RTCPeerConnection,
+  RTCRtpCodecParameters,
+} from 'werift';
 import { SignalingServer } from '../../src/main/signaling/server.js';
 import { PeerNode } from '../../src/main/signaling/peer-node.js';
+import { freePort } from '../helpers/free-port.js';
+import type { MediaBody } from '../../src/shared/ipc.js';
 import type { RoomParams } from '../../src/shared/protocol.js';
 
 const roomId = new Uint8Array([0xfa, 0x11, 0x00, 0x77]);
@@ -12,14 +18,6 @@ const roomParams: RoomParams = {
   maxRecommendedSubscriptions: 2,
   videoBitrateKbps: 2500,
 };
-
-async function freePort(): Promise<number> {
-  const s = createServer();
-  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-  const port = (s.address() as { port: number }).port;
-  await new Promise<void>((r) => s.close(() => r()));
-  return port;
-}
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -162,4 +160,90 @@ describe('host failover', () => {
     const newHost = nodes.find((n) => n.isHost)!;
     expect(newHost.epoch).toBe(1);
   });
+
+  it('the promoted node runs an SFU, so publishing works after failover', async () => {
+    const host = new SignalingServer({
+      roomId,
+      w: W,
+      roomParams,
+      hostNickname: 'host',
+      verifyInbound: true,
+      heartbeatIntervalMs: 40,
+      heartbeatMaxMissed: 3,
+    });
+    servers.push(host);
+    const { port: hostPort } = await host.listen();
+
+    for (const nickname of ['ana', 'bento']) {
+      const node = new PeerNode({
+        host: '127.0.0.1',
+        port: hostPort,
+        roomId,
+        w: W,
+        roomParams,
+        nickname,
+        inboundPort: await freePort(),
+        sfu: { videoBitrateKbps: 2500 },
+        heartbeatIntervalMs: 40,
+        heartbeatMaxMissed: 3,
+        staggerMs: 100,
+        reconnectDelayMs: 120,
+      });
+      nodes.push(node);
+      await node.start();
+    }
+
+    await until(() =>
+      host.roster.filter((e) => !e.isHost).every((e) => e.inboundVerified),
+    );
+
+    let promotedCount = 0;
+    nodes.forEach((n) => n.on('promoted', () => promotedCount++));
+    host.crash();
+    await until(() => promotedCount === 1, 12000);
+
+    const newHost = nodes.find((n) => n.isHost)!;
+    const replies: MediaBody[] = [];
+    newHost.on('media', (b) => replies.push(b));
+
+    // publish a synthetic stream straight into the promoted node's SFU
+    const pc = new RTCPeerConnection({
+      codecs: {
+        video: [
+          new RTCRtpCodecParameters({
+            mimeType: 'video/VP8',
+            clockRate: 90000,
+            rtcpFeedback: [{ type: 'nack' }, { type: 'nack', parameter: 'pli' }],
+            payloadType: 96,
+          }),
+        ],
+      },
+    });
+    pc.addTransceiver(new MediaStreamTrack({ kind: 'video' }), {
+      direction: 'sendonly',
+    });
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise<void>((r) => {
+      if (pc.iceGatheringState === 'complete') return r();
+      const t = setTimeout(r, 3000);
+      pc.iceGatheringStateChange.subscribe((s: string) => {
+        if (s === 'complete') {
+          clearTimeout(t);
+          r();
+        }
+      });
+    });
+
+    newHost.sendMedia({
+      type: 'publish_offer',
+      streamId: 'post-failover',
+      video: true,
+      audio: false,
+      sdp: pc.localDescription!.sdp,
+    });
+
+    await until(() => replies.some((b) => b.type === 'publish_answer'), 8000);
+    expect(newHost.streams.map((s) => s.streamId)).toContain('post-failover');
+    pc.close();
+  }, 30000);
 });

@@ -15,7 +15,7 @@
 
 ## 0. Estado da implementação (leia primeiro numa nova sessão)
 
-**Fases 0, 1, 2 concluídas. Fase 3 em andamento — checkpoints 3.1 (shell), 3.2 (captura), 3.3 (SFU), 3.4 (encaminhamento seletivo) e 3.5 (governor de qualidade) prontos.**
+**Fases 0, 1, 2 concluídas. Fase 3 em andamento — checkpoints 3.1 (shell), 3.2 (captura), 3.3 (SFU), 3.4 (encaminhamento seletivo), 3.5 (governor) e 3.6 (mídia sobrevive ao failover) prontos. Falta só o 3.7 (teste de campo).**
 
 **O que já existe e passa nos testes** (`npm test` → 135 testes, 20 arquivos; `npm run typecheck` limpo — Node + web; `npm audit` → 0 vulnerabilidades):
 
@@ -34,7 +34,7 @@
 | Spike | `scripts/spike-sfu-throughput.mts`, `docs/SPIKE-SFU.md` | werift sustenta ~6.200 pkt/s a ~64% de um núcleo (pior caso) |
 | Ferramenta | `scripts/check-network.mts` (`npm run check:network`) | roda STUN+NAT+geração de código na rede real |
 
-**O que NÃO existe ainda (o resto da Fase 3):** restaurar publicações/assinaturas após um failover (o `SignalingServer` da promoção é criado sem `media`, então o herdeiro promovido não tem SFU); ICE trickle; teste de campo real werift↔Chromium entre máquinas. `src/main/config/` (settings.json) ainda não existe.
+**O que NÃO existe ainda (o resto da Fase 3):** ICE trickle (hoje non-trickle); teste de campo real werift↔Chromium entre máquinas (3.7). `src/main/config/` (settings.json) ainda não existe.
 
 **Toolchain (Fase 3.1):** `electron@44` + `electron-vite@5` (com `vite@7` — fixado porque `electron-vite` ainda não aceita vite 8) + `@vitejs/plugin-react@5` + `react@19`. `werift` agora está em `dependencies`. Dois tsconfig: `tsconfig.json` (Node: main/preload/shared/test) e `tsconfig.web.json` (renderer: DOM + jsx). O preload é forçado a `.cjs` (`electron.vite.config.ts`) porque preload em sandbox precisa ser CommonJS. `src/renderer/vite.config.ts` existe só para rodar o renderer sozinho no browser (`vite src/renderer`, com `?mock` → `src/renderer/src/mock.ts` stub-a o `window.erros`).
 
@@ -561,7 +561,9 @@ O `heir_probe` evita split-brain: um peer isolado pergunta ao herdeiro e, se ele
 
 **Saída graciosa** (`SignalingServer.transferHost()`): nomeia o melhor sucessor, faz broadcast de `host_transfer{successorPeerId, epoch}`, dá `graceMs` (~1,5 s) e fecha. O peer nomeado promove direto; os outros fazem `connect-heir`. Sem esperar timeout de heartbeat.
 
-**Estado transferido:** roster (todos já têm), parâmetros da sala (idem), `epoch` (no `joined`). As chaves são recalculadas de `w`. **Nenhum segredo trafega no failover.** ⚠️ **Ainda não restaurado:** quem estava transmitindo e o que cada um assistia — isso entra com a mídia (Fase 3).
+**Estado transferido:** roster, parâmetros da sala, `epoch` (no `joined`). As chaves são recalculadas de `w`. **Nenhum segredo trafega no failover.**
+
+**Mídia após o failover (3.6):** o `PeerNode` recebe uma opção `sfu` — ao promover, ele sobe uma `SfuMediaPlane` própria e a liga ao `SignalingServer` novo. No renderer, `useMedia(streams, epoch)` observa o `epoch`: quando ele muda, todos os `RTCPeerConnection` (que apontavam para o SFU morto) são fechados; se este peer estava transmitindo, ele **re-publica** automaticamente (novo `streamId`); as assinaturas são reconciliadas por **peerId do dono** (estável no failover), então o renderer re-assina sozinho os fluxos que voltam. Interrupção de poucos segundos, sem clique do usuário. Teste: `test/signaling/failover.integration.test.ts` publica um stream sintético no herdeiro promovido e confirma o `publish_answer`.
 
 **Se ninguém consegue ser host:** a sala encerra com mensagem explícita ("nenhum participante consegue aceitar conexões; peça a alguém para configurar port forwarding ou um TURN"). Consideramos degradar para malha pura: com 12 pessoas isso é O(N²) de encoders no transmissor (11 encodes 1080p por pessoa transmitindo), o que é pior que encerrar. **Escolha registrada: encerrar, não degradar.** Malha só faria sentido para 2–3 pessoas, e nesse caso o problema de host provavelmente também não existiria.
 
@@ -769,8 +771,8 @@ Ao fim da Fase 1 o entregável demonstrável é: três instâncias em redes dife
    - **Ainda não feito neste checkpoint:** múltiplas assinaturas por peer com renegociação (hoje 1 sub-PC por streamId, recriado a cada mudança); ICE trickle; `announceIp`/`icePortRange` do werift ainda não validados para rede real.
 4. ✅ **Encaminhamento seletivo + controle básico de qualidade.** O router emite `demand-changed` quando a contagem de assinantes de um stream cruza 0↔1; a `SfuMediaPlane` transforma isso em `quality_directive` **direcionado ao dono** (`maxKbps:0 reason:no_viewers` sem espectador, `maxKbps:<alvo> reason:restored` quando volta). `SignalingServer.sendTo(peerId, body)` para mensagens direcionadas. Renderer (`useMedia`): aplica no `RTCRtpSender` — `replaceTrack(null)` para pausar, `setParameters` com `maxBitrate`/`maxFramerate` para o alvo; expõe `publishIdle` (UI: "⏸ pausado — ninguém assistindo") e `watching` (contagem). Aviso de performance quando `watching > roomParams.maxRecommendedSubscriptions` (default 2). Multi-assinatura por peer **funciona** — 1 PC por streamId. Testes: `test/sfu/{router,media-plane}.test.ts`.
 5. ✅ **Governor de qualidade.** `src/main/sfu/governor.ts` — loop de controle puro (timer-agnóstico): escada `QUALITY_LADDER` de 4 níveis (1080p30 → 720p30 → 720p15 → 480p15), um nível por stream. Desce rápido (1 janela ruim: perda > 5% do pior assinante, ou CPU do publisher), sobe devagar (N janelas saudáveis). `stats_report` (peer → host, a cada 4 s): perda/jitter/RTT/fps por assinatura + `cpuPressure` (do `qualityLimitationReason` do Chromium)/fps por publicação. `SfuMediaPlane` roda `evaluate()` a cada 5 s e manda `quality_directive` (com `scaleDownBy`). Renderer aplica `maxBitrate`/`maxFramerate`/`scaleResolutionDownBy` no `RTCRtpSender`. Testes: `test/sfu/governor.test.ts` (8 casos, clock/stats injetados).
-6. **Restaurar estado de mídia no failover.** Hoje `PeerNode.#applyAction` só reconecta o controle; o SFU do herdeiro promovido não existe ainda (o `SignalingServer` da promoção é criado sem `media`).
-7. **Teste de campo:** 2 transmitindo, 1 assistindo ambos, 1 assistindo um — em máquinas de casas diferentes.
+6. ✅ **Mídia sobrevive ao failover.** `PeerNodeOptions.sfu` → na promoção o node cria `SfuMediaPlane` e liga ao servidor novo; `PeerNode.sendMedia`/`streams` roteiam para o plano local quando é host. Renderer `useMedia(streams, epoch)`: no bump de `epoch`, fecha todos os PCs, re-publica se estava transmitindo, e re-assina por `ownerPeerId` (estável). Teste: `test/signaling/failover.integration.test.ts` ("the promoted node runs an SFU").
+7. **Teste de campo:** 2 transmitindo, 1 assistindo ambos, 1 assistindo um — em máquinas de casas diferentes. É onde a interop werift↔Chromium se prova (docs/TESTING-MEDIA.md).
 
 ### 17.2.1 Como o `RoomSession` funciona hoje (para estender)
 

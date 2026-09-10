@@ -65,17 +65,29 @@ export interface JoinOptions {
   readonly skipNat?: boolean;
 }
 
+/** test-only (skipNat): a loopback port that is actually re-bindable now. */
 async function freePort(): Promise<number> {
-  const s = createServer();
-  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-  const port = (s.address() as { port: number }).port;
-  await new Promise<void>((r) => s.close(() => r()));
-  return port;
+  for (let i = 0; i < 20; i++) {
+    const s = createServer();
+    const port = await new Promise<number>((resolve, reject) => {
+      s.once('error', reject);
+      s.listen(0, '127.0.0.1', () =>
+        resolve((s.address() as { port: number }).port),
+      );
+    });
+    await new Promise<void>((r) => s.close(() => r()));
+    const ok = await new Promise<boolean>((resolve) => {
+      const t = createServer();
+      t.once('error', () => resolve(false));
+      t.listen(port, '127.0.0.1', () => t.close(() => resolve(true)));
+    });
+    if (ok) return port;
+  }
+  throw new Error('no free loopback port');
 }
 
 export class RoomSession extends EventEmitter<RoomSessionEvents> {
   #phase: SessionPhase = 'idle';
-  #isHost = false;
   #nickname = '';
   #code: string | null = null;
   #codeStatus: RoomCodeStatus | null = null;
@@ -97,7 +109,6 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
 
   static async host(opts: HostOptions): Promise<RoomSession> {
     const session = new RoomSession();
-    session.#isHost = true;
     session.#nickname = opts.nickname;
     session.#phase = 'discovering';
     session.#emit();
@@ -177,6 +188,12 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       nickname: opts.nickname,
       inboundPort,
       codeSalt: decoded.codeSalt,
+      // a promoted node runs an SFU of its own so media survives the failover
+      sfu: {
+        videoBitrateKbps: DEFAULT_ROOM_PARAMS.videoBitrateKbps,
+        announceIp: () =>
+          opts.skipNat ? undefined : (primaryLanIpv4() ?? undefined),
+      },
       resolveExternalEndpoint: opts.skipNat
         ? async (p) => ({ family: 'ipv4', address: '127.0.0.1', port: p })
         : async (p) => {
@@ -207,25 +224,22 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
   }
 
   snapshot(): SessionSnapshot {
-    const roster: RosterEntry[] = this.#isHost
-      ? (this.#server?.roster ?? [])
-      : (this.#node?.roster ?? []);
+    // the PeerNode is authoritative once it exists (it knows if it promoted);
+    // otherwise the original-host SignalingServer is.
+    const node = this.#node;
+    const isHost = node ? node.isHost : this.#server !== undefined;
     return {
       phase: this.#phase,
-      isHost: this.#isHost || (this.#node?.isHost ?? false),
-      selfPeerId: this.#isHost
-        ? (this.#server?.hostPeerId ?? '')
-        : (this.#node?.peerId ?? ''),
+      isHost,
+      selfPeerId: node ? node.peerId : (this.#server?.hostPeerId ?? ''),
       nickname: this.#nickname,
-      epoch: this.#isHost ? (this.#server?.epoch ?? 0) : (this.#node?.epoch ?? 0),
+      epoch: node ? node.epoch : (this.#server?.epoch ?? 0),
       code: this.#code,
       codeStatus: this.#codeStatus,
-      roster,
+      roster: node ? node.roster : (this.#server?.roster ?? []),
       streams: this.streams,
-      maxRecommendedSubscriptions: (this.#isHost
-        ? this.#roomParams
-        : (this.#node?.roomParams ?? this.#roomParams)
-      ).maxRecommendedSubscriptions,
+      maxRecommendedSubscriptions: (node?.roomParams ?? this.#roomParams)
+        .maxRecommendedSubscriptions,
       notice: this.#notice,
     };
   }
@@ -280,20 +294,18 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
   // --- media (driven by the renderer through IPC) --------------------
 
   get streams(): StreamInfo[] {
-    if (this.#isHost) return this.#media?.listStreams() ?? [];
-    return this.#node?.streams ?? [];
-  }
-
-  /** The renderer's local peer id for SFU calls (host uses the host id). */
-  #selfPeerId(): string {
-    return this.#isHost
-      ? (this.#server?.hostPeerId ?? 'host')
-      : (this.#node?.peerId ?? '');
+    if (this.#media) return this.#media.listStreams();
+    if (this.#node) return this.#node.streams;
+    return [];
   }
 
   async sendMedia(body: MediaBody): Promise<void> {
-    if (this.#isHost && this.#media) {
-      const reply = await this.#media.handleMessage(this.#selfPeerId(), body);
+    // original host: its own SFU. peer (incl. one that promoted): the node.
+    if (this.#media && !this.#node) {
+      const reply = await this.#media.handleMessage(
+        this.#server?.hostPeerId ?? 'host',
+        body,
+      );
       if (reply) {
         this.emit('media', reply);
         this.#emit();
@@ -308,7 +320,6 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     node.on('streams', () => this.#emit());
     node.on('media', (body) => this.emit('media', body));
     node.on('promoted', ({ code }) => {
-      this.#isHost = true;
       this.#phase = 'hosting';
       if (code) this.#code = code;
       this.#notice = 'Você virou o host desta sala.';

@@ -153,8 +153,10 @@ Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localh
         `docs/TESTING-MEDIA.md`** com o app real.
   - [x] Governor de qualidade: escada 1080p30→720p→480p, degradação por
         perda/CPU medida (`stats_report` a cada 4 s), recuperação gradual.
-  - [ ] Restaurar mídia após failover (o herdeiro promovido ainda não tem SFU).
+  - [x] Mídia sobrevive ao failover: o herdeiro promovido sobe seu próprio SFU,
+        os peers re-publicam/re-assinam sozinhos ao trocar de host.
   - [ ] ICE trickle (hoje non-trickle — junta candidatos e manda o SDP).
+  - [ ] Teste de campo real (3.7) — valida a interop werift↔Chromium.
   - [ ] Governor (escada de qualidade, avisos de performance) + `stats_report`.
   - [ ] Restaurar estado de mídia após failover.
 - [ ] **Fase 4** — Empacotamento (electron-builder) e robustez.
@@ -197,5 +199,6 @@ as fases avançam.
     abrir uma conexão para a porta anunciada pelo peer, mas ainda não prova
     (com um handshake curto) que o listener é daquele peer. O `heir_probe` UDP
     autenticado por `w` cobre parte disso no failover.
-15. **O failover reconecta só o plano de controle.** Restaurar quem transmitia
-    e o que cada um assistia entra junto com a mídia (Fase 3).
+15. **No failover, a mídia pisca por alguns segundos.** O renderer re-publica e
+    re-assina sozinho ao trocar de host, mas há uma interrupção enquanto os
+    `RTCPeerConnection` se restabelecem contra o SFU do novo host.

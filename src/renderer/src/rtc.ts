@@ -30,7 +30,10 @@ async function gathered(pc: RTCPeerConnection): Promise<void> {
 export interface MediaEngine {
   readonly localStream: MediaStream | null;
   readonly localStreamId: string | null;
+  /** true when the SFU told us to stop encoding (nobody watching) */
+  readonly publishIdle: boolean;
   readonly remote: Map<string, MediaStream>;
+  readonly watching: number;
   readonly error: string | null;
   publish(stream: MediaStream): Promise<void>;
   unpublish(): void;
@@ -42,7 +45,9 @@ export interface MediaEngine {
 export function useMedia(streams: StreamInfo[]): MediaEngine {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const localIdRef = useRef<string | null>(null);
+  const publishStreamRef = useRef<MediaStream | null>(null);
   const publishPc = useRef<RTCPeerConnection | null>(null);
+  const [publishIdle, setPublishIdle] = useState(false);
   const subPcs = useRef<Map<string, RTCPeerConnection>>(new Map());
   const [remote, setRemote] = useState<Map<string, MediaStream>>(new Map());
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +69,8 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
     publishPc.current?.close();
     publishPc.current = null;
     localIdRef.current = null;
+    publishStreamRef.current = null;
+    setPublishIdle(false);
     setLocalStream(null);
   }, []);
 
@@ -73,6 +80,7 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
     const streamId = crypto.randomUUID();
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     publishPc.current = pc;
+    publishStreamRef.current = stream;
     localIdRef.current = streamId;
 
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
@@ -124,6 +132,37 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
           await publishPc.current
             .setRemoteDescription({ type: 'answer', sdp: body.sdp })
             .catch((e: Error) => setError(`publicação falhou: ${e.message}`));
+          break;
+        }
+        case 'quality_directive': {
+          if (localIdRef.current !== body.streamId || !publishPc.current) return;
+          const pc = publishPc.current;
+          const src = publishStreamRef.current;
+          const idle = body.maxKbps === 0;
+          for (const sender of pc.getSenders()) {
+            const kind = sender.track?.kind ?? 'video';
+            if (idle) {
+              void sender.replaceTrack(null);
+            } else if (src) {
+              const track =
+                sender.track ??
+                (kind === 'audio'
+                  ? src.getAudioTracks()[0]
+                  : src.getVideoTracks()[0]) ??
+                null;
+              if (track && sender.track !== track) void sender.replaceTrack(track);
+              if (kind === 'video') {
+                const params = sender.getParameters();
+                params.encodings = params.encodings?.length
+                  ? params.encodings
+                  : [{}];
+                params.encodings[0]!.maxBitrate = body.maxKbps * 1000;
+                if (body.maxFps) params.encodings[0]!.maxFramerate = body.maxFps;
+                void sender.setParameters(params).catch(() => {});
+              }
+            }
+          }
+          setPublishIdle(idle);
           break;
         }
         case 'subscribe_offer': {
@@ -203,7 +242,9 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
   return {
     localStream,
     localStreamId: localIdRef.current,
+    publishIdle,
     remote,
+    watching: subPcs.current.size,
     error,
     publish,
     unpublish,

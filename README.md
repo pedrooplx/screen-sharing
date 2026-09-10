@@ -146,11 +146,13 @@ Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localh
   - [x] Captura de tela/janela + áudio do sistema (WASAPI loopback): seletor de
         fontes com miniatura e prévia local em `<video>` (`CapturePanel`).
   - [x] Mini-SFU werift no `main` (`src/main/sfu/`); publish/subscribe ponta a
-        ponta com encaminhamento RTP sem transcodificar. `useMedia()` +
-        `StreamsPanel` no renderer. werift↔werift testado; **interop com o
-        Chromium: rodar `docs/TESTING-MEDIA.md`** com o app real.
-  - [ ] Múltiplas assinaturas por peer com renegociação; ICE trickle.
-  - [ ] `quality_directive` para desligar encoder sem espectadores.
+        ponta com encaminhamento RTP sem transcodificar. Múltiplas assinaturas
+        por peer. `quality_directive`: pausa o encoder do transmissor quando
+        ninguém assiste, restaura quando volta. Aviso ao assistir muitos fluxos.
+        werift↔werift testado; **interop com o Chromium: rodar
+        `docs/TESTING-MEDIA.md`** com o app real.
+  - [ ] Governor completo: escada de qualidade progressiva + `stats_report`.
+  - [ ] ICE trickle (hoje non-trickle — junta candidatos e manda o SDP).
   - [ ] Governor (escada de qualidade, avisos de performance) + `stats_report`.
   - [ ] Restaurar estado de mídia após failover.
 - [ ] **Fase 4** — Empacotamento (electron-builder) e robustez.

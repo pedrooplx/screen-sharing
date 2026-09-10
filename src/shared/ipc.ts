@@ -39,6 +39,8 @@ export interface SessionSnapshot {
   readonly codeStatus: RoomCodeStatus | null;
   readonly roster: RosterEntry[];
   readonly streams: StreamInfo[];
+  /** soft cap on simultaneous subscriptions before the UI warns */
+  readonly maxRecommendedSubscriptions: number;
   readonly notice: string | null;
 }
 
@@ -114,6 +116,7 @@ export type MediaBody = Extract<
       | 'subscribe_answer'
       | 'unsubscribe'
       | 'stream_state'
-      | 'media_error';
+      | 'media_error'
+      | 'quality_directive';
   }
 >;

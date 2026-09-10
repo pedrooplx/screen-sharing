@@ -245,6 +245,19 @@ export const mediaErrorSchema = z.object({
   reason: z.string().max(160),
 });
 
+/**
+ * host -> the publishing peer: encode this stream at most this hard.
+ * `maxKbps: 0` means "nobody is watching, stop sending". The peer applies it
+ * via RTCRtpSender parameters / replaceTrack.
+ */
+export const qualityDirectiveSchema = z.object({
+  type: z.literal('quality_directive'),
+  streamId: z.string().min(1).max(64),
+  maxKbps: z.number().int().min(0).max(20_000),
+  maxFps: z.number().int().min(0).max(120),
+  reason: z.enum(['no_viewers', 'restored', 'bandwidth', 'cpu']),
+});
+
 export const bodySchema = z.discriminatedUnion('type', [
   joinSchema,
   joinedSchema,
@@ -263,6 +276,7 @@ export const bodySchema = z.discriminatedUnion('type', [
   unsubscribeSchema,
   streamStateSchema,
   mediaErrorSchema,
+  qualityDirectiveSchema,
 ]);
 export type Body = z.infer<typeof bodySchema>;
 

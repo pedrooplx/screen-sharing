@@ -79,7 +79,11 @@ export function CapturePanel({ media }: { media: MediaEngine }) {
         <p className="muted" style={{ marginBottom: 0 }}>
           {capture.source.name}
           {capture.hasAudio ? ' · com áudio do sistema' : ' · sem áudio'}
-          {published ? ' · no ar' : ' · negociando…'}
+          {media.publishIdle
+            ? ' · ⏸ pausado (ninguém assistindo — economizando CPU e banda)'
+            : published
+              ? ' · no ar'
+              : ' · negociando…'}
         </p>
         {media.error && <div className="error">{media.error}</div>}
       </div>

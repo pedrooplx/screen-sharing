@@ -36,6 +36,7 @@ function idleSnapshot(): SessionSnapshot {
     codeStatus: null,
     roster: [],
     streams: [],
+    maxRecommendedSubscriptions: 2,
     notice: null,
   };
 }

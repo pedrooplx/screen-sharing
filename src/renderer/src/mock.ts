@@ -18,6 +18,7 @@ let state: SessionSnapshot = {
   codeStatus: null,
   roster: [],
   streams: [],
+  maxRecommendedSubscriptions: 2,
   notice: null,
 };
 

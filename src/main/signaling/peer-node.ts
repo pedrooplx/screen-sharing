@@ -94,6 +94,9 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
   get isHost(): boolean {
     return this.#isHost;
   }
+  get roomParams(): RoomParams {
+    return this.#roomParams;
+  }
   get streams(): StreamInfo[] {
     return this.#client?.streams ?? [];
   }

@@ -34,10 +34,14 @@ export interface MediaPlane {
 
 export class SfuMediaPlane implements MediaPlane {
   readonly #router: SfuRouter;
+  readonly #videoBitrateKbps: number;
   #broadcast: (body: MediaBody) => void = () => {};
+  #sendTo: (peerId: string, body: MediaBody) => void = () => {};
 
-  constructor(opts: SfuOptions = {}) {
+  constructor(opts: SfuOptions & { videoBitrateKbps?: number } = {}) {
     this.#router = new SfuRouter(opts);
+    this.#videoBitrateKbps = opts.videoBitrateKbps ?? 2500;
+
     this.#router.on('stream-live', (stream) =>
       this.#broadcast({ type: 'stream_state', stream, state: 'live' }),
     );
@@ -48,11 +52,26 @@ export class SfuMediaPlane implements MediaPlane {
         state: 'ended',
       });
     });
+    // selective forwarding: tell the owner to stop/resume encoding
+    this.#router.on('demand-changed', ({ streamId, ownerPeerId, subscribers }) => {
+      this.#sendTo(ownerPeerId, {
+        type: 'quality_directive',
+        streamId,
+        maxKbps: subscribers === 0 ? 0 : this.#videoBitrateKbps,
+        maxFps: subscribers === 0 ? 0 : 30,
+        reason: subscribers === 0 ? 'no_viewers' : 'restored',
+      });
+    });
   }
 
   /** Wired by RoomSession once the SignalingServer exists. */
   attachBroadcast(fn: (body: MediaBody) => void): void {
     this.#broadcast = fn;
+  }
+
+  /** Wired by RoomSession: deliver a targeted body to one peer (or the host). */
+  attachSendTo(fn: (peerId: string, body: MediaBody) => void): void {
+    this.#sendTo = fn;
   }
 
   listStreams(): StreamInfo[] {

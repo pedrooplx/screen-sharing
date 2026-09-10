@@ -5,6 +5,7 @@ import {
   mediaErrorSchema,
   publishAnswerSchema,
   publishOfferSchema,
+  qualityDirectiveSchema,
   streamStateSchema,
   subscribeAnswerSchema,
   subscribeOfferSchema,
@@ -37,4 +38,5 @@ export const mediaBodySchema = z.discriminatedUnion('type', [
   unsubscribeSchema,
   streamStateSchema,
   mediaErrorSchema,
+  qualityDirectiveSchema,
 ]);

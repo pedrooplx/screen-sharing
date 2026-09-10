@@ -15,9 +15,9 @@
 
 ## 0. Estado da implementação (leia primeiro numa nova sessão)
 
-**Fases 0, 1, 2 concluídas. Fase 3 em andamento — checkpoints 3.1 (shell), 3.2 (captura local) e 3.3 (SFU + publish/subscribe) prontos.**
+**Fases 0, 1, 2 concluídas. Fase 3 em andamento — checkpoints 3.1 (shell), 3.2 (captura), 3.3 (SFU) e 3.4 (encaminhamento seletivo + quality directive) prontos.**
 
-**O que já existe e passa nos testes** (`npm test` → 122 testes, 18 arquivos; `npm run typecheck` limpo — Node + web; `npm audit` → 0 vulnerabilidades):
+**O que já existe e passa nos testes** (`npm test` → 127 testes, 19 arquivos; `npm run typecheck` limpo — Node + web; `npm audit` → 0 vulnerabilidades):
 
 | Área | Módulos | Status |
 |---|---|---|
@@ -30,7 +30,7 @@
 | Protocolo | `src/shared/protocol.ts` | todas as mensagens em `zod`; `epoch` no envelope e no `joined` |
 | **App shell (3.1)** | `src/main/index.ts`, `src/main/app/{room-session,ipc}.ts`, `src/preload/index.ts`, `src/renderer/` | Electron + React (pt-BR); `RoomSession` (criar/entrar, une host↔peer); IPC tipado por `window.erros`; lobby + tela de sala com roster ao vivo, código, status de rede. `npm run dev` sobe tudo |
 | **Captura local (3.2)** | `src/main/app/capture.ts`, `src/renderer/src/{capture.ts,CapturePanel.tsx}` | listar telas/janelas com thumbnail, `setDisplayMediaRequestHandler` com áudio de sistema (`audio: 'loopback'`), prévia local em `<video>` |
-| **SFU + mídia (3.3)** | `src/main/sfu/{router,codecs,media-plane}.ts`, `src/renderer/src/{rtc.ts,StreamsPanel.tsx}` | mini-SFU werift no `main`: 1 PC por publisher, 1 por assinatura; encaminha RTP sem transcodificar; PLI ao primeiro pacote. Negociação **non-trickle** (junta ICE, manda SDP). Mensagens `publish_offer`/`publish_answer`/`subscribe`/`subscribe_offer`/`subscribe_answer`/`unpublish`/`unsubscribe`/`stream_state` no `bodySchema`. Renderer: `useMedia()` hook — publica a captura, assina streams, `<video>` por assinatura. **werift↔werift testado** (`test/sfu/router.test.ts`); **werift↔Chromium só valida com o app real** (ver docs/TESTING-MEDIA.md) |
+| **SFU + mídia (3.3–3.4)** | `src/main/sfu/{router,codecs,media-plane}.ts`, `src/renderer/src/{rtc.ts,StreamsPanel.tsx}` | mini-SFU werift no `main`: 1 PC por publisher, 1 por (assinante×stream); encaminha RTP sem transcodificar; PLI ao primeiro pacote. Negociação **non-trickle**. `demand-changed` → `quality_directive` direcionado (`sendTo`): `maxKbps:0` pausa o encoder do dono quando ninguém assiste, restaura quando volta. Renderer `useMedia()`: publica, assina múltiplos streams, aplica directive no `RTCRtpSender`, expõe `publishIdle`/`watching`; aviso ao passar de `maxRecommendedSubscriptions`. **werift↔werift testado** (`test/sfu/{router,media-plane}.test.ts`); **werift↔Chromium só valida com o app real** (docs/TESTING-MEDIA.md) |
 | Spike | `scripts/spike-sfu-throughput.mts`, `docs/SPIKE-SFU.md` | werift sustenta ~6.200 pkt/s a ~64% de um núcleo (pior caso) |
 | Ferramenta | `scripts/check-network.mts` (`npm run check:network`) | roda STUN+NAT+geração de código na rede real |
 
@@ -767,8 +767,8 @@ Ao fim da Fase 1 o entregável demonstrável é: três instâncias em redes dife
 3. ✅ **Publisher → SFU → 1 assinante.** `src/main/sfu/router.ts` (`SfuRouter`: `publish`/`subscribe`/`unpublish`/`unsubscribe`/`removePeer`, 1 werift PC por lado, forward de `RtpPacket` direto, PLI no primeiro pacote); `codecs.ts` (VP8/VP9/H264 + Opus); `media-plane.ts` (`SfuMediaPlane` — traduz `Body` ↔ chamadas do router, `attachBroadcast` para `stream_state`). `SignalingServer` roteia mensagens de mídia via `opts.media`. `RoomSession` cria o SFU no host e faz passthrough no peer. Renderer: `useMedia()` + `StreamsPanel`. **Negociação non-trickle.** `test/sfu/router.test.ts` prova werift↔werift; a interop com o Chromium é `docs/TESTING-MEDIA.md` (roteiro manual, 2 instâncias).
    - **Pendente de validação na máquina do usuário:** se a negociação werift↔Chromium falhar, plano B `mediasoup` — anotar a mensagem de erro do tile "assinatura falhou".
    - **Ainda não feito neste checkpoint:** múltiplas assinaturas por peer com renegociação (hoje 1 sub-PC por streamId, recriado a cada mudança); ICE trickle; `announceIp`/`icePortRange` do werift ainda não validados para rede real.
-4. **Encaminhamento seletivo** já é a regra (sub sem assinante = sem PC) mas falta: `quality_directive{maxKbps:0}` para o transmissor desligar o encoder quando ninguém assiste; `publishing` no roster (hoje o badge "transmitindo" vem de `snapshot.streams`, não do roster).
-5. **Governor** (escada de qualidade, avisos de performance) + `stats_report`.
+4. ✅ **Encaminhamento seletivo + controle básico de qualidade.** O router emite `demand-changed` quando a contagem de assinantes de um stream cruza 0↔1; a `SfuMediaPlane` transforma isso em `quality_directive` **direcionado ao dono** (`maxKbps:0 reason:no_viewers` sem espectador, `maxKbps:<alvo> reason:restored` quando volta). `SignalingServer.sendTo(peerId, body)` para mensagens direcionadas. Renderer (`useMedia`): aplica no `RTCRtpSender` — `replaceTrack(null)` para pausar, `setParameters` com `maxBitrate`/`maxFramerate` para o alvo; expõe `publishIdle` (UI: "⏸ pausado — ninguém assistindo") e `watching` (contagem). Aviso de performance quando `watching > roomParams.maxRecommendedSubscriptions` (default 2). Multi-assinatura por peer **funciona** — 1 PC por streamId. Testes: `test/sfu/{router,media-plane}.test.ts`.
+5. **Governor** completo — escada de qualidade progressiva (não só liga/desliga), `stats_report` do peer (RTT/perda/CPU), degradação por banda/CPU medida (não só por contagem de fluxos).
 6. **Restaurar estado de mídia no failover.** Hoje `PeerNode.#applyAction` só reconecta o controle; o SFU do herdeiro promovido não existe ainda (o `SignalingServer` da promoção é criado sem `media`).
 7. **Teste de campo:** 2 transmitindo, 1 assistindo ambos, 1 assistindo um — em máquinas de casas diferentes.
 

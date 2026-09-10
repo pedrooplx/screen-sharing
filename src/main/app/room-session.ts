@@ -83,6 +83,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
 
   #w: Uint8Array | null = null;
   #argonParams: ArgonParams | undefined;
+  #roomParams: RoomParams = DEFAULT_ROOM_PARAMS;
   #server: SignalingServer | undefined;
   #node: PeerNode | undefined;
   #media: SfuMediaPlane | undefined;
@@ -110,6 +111,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
 
     const port = opts.port ?? 47821;
     const roomParams = opts.roomParams ?? DEFAULT_ROOM_PARAMS;
+    session.#roomParams = roomParams;
 
     if (opts.skipNat) {
       const bound = await freePort();
@@ -220,6 +222,10 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       codeStatus: this.#codeStatus,
       roster,
       streams: this.streams,
+      maxRecommendedSubscriptions: (this.#isHost
+        ? this.#roomParams
+        : (this.#node?.roomParams ?? this.#roomParams)
+      ).maxRecommendedSubscriptions,
       notice: this.#notice,
     };
   }
@@ -237,6 +243,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
         ? this.#codeStatus.externalAddress
         : (primaryLanIpv4() ?? undefined);
     const media = new SfuMediaPlane({
+      videoBitrateKbps: roomParams.videoBitrateKbps,
       ...(announceIp ? { announceIp } : {}),
     });
     this.#media = media;
@@ -257,6 +264,11 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       server.broadcast(body);
       this.emit('media', body);
       this.#emit();
+    });
+    // quality_directive is targeted at one peer (or the host's own renderer)
+    media.attachSendTo((peerId, body) => {
+      if (peerId === server.hostPeerId) this.emit('media', body);
+      else server.sendTo(peerId, body);
     });
     server.on('peer-joined', () => this.#emit());
     server.on('peer-left', () => this.#emit());

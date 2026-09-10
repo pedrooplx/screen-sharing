@@ -177,6 +177,41 @@ describe('SfuRouter', () => {
     stop();
   }, 20000);
 
+  it('emits demand-changed as the subscriber count crosses 0<->1', async () => {
+    const router = new SfuRouter();
+    routers.push(router);
+    const demand: number[] = [];
+    router.on('demand-changed', ({ streamId, subscribers }) => {
+      if (streamId === 'sd') demand.push(subscribers);
+    });
+
+    const stop = await publish(router, 'p_a', 'sd');
+    await subscribe(router, 'p_b', 'sd');
+    await subscribe(router, 'p_c', 'sd');
+    router.unsubscribe('p_b', 'sd');
+    router.unsubscribe('p_c', 'sd');
+
+    expect(demand).toEqual([1, 2, 1, 0]);
+    stop();
+  }, 20000);
+
+  it('two viewers watch two streams (2 publishers x 2 subscribers)', async () => {
+    const router = new SfuRouter();
+    routers.push(router);
+    const stopA = await publish(router, 'p_a', 'ta');
+    const stopB = await publish(router, 'p_b', 'tb');
+
+    // p_c watches both
+    const ca = await subscribe(router, 'p_c', 'ta');
+    const cb = await subscribe(router, 'p_c', 'tb');
+    await until(() => ca.received() > 3 && cb.received() > 3);
+
+    expect(router.subscriberCount('ta')).toBe(1);
+    expect(router.subscriberCount('tb')).toBe(1);
+    stopA();
+    stopB();
+  }, 25000);
+
   it('removePeer drops both the peer\'s stream and its subscriptions', async () => {
     const router = new SfuRouter();
     routers.push(router);

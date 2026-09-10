@@ -300,6 +300,7 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
       case 'publish_answer':
       case 'subscribe_offer':
       case 'media_error':
+      case 'quality_directive':
         this.emit('media', env.body);
         break;
       default:

@@ -15,6 +15,7 @@ const IDLE: SessionSnapshot = {
   codeStatus: null,
   roster: [],
   streams: [],
+  maxRecommendedSubscriptions: 2,
   notice: null,
 };
 
@@ -212,6 +213,14 @@ function Room({ snap }: { snap: SessionSnapshot }) {
               roteador para o IP local deste PC — senão ninguém consegue entrar.
             </p>
           )}
+        </div>
+      )}
+
+      {media.watching > snap.maxRecommendedSubscriptions && (
+        <div className="notice">
+          Você está assistindo {media.watching} transmissões ao mesmo tempo. Acima
+          de {snap.maxRecommendedSubscriptions} o consumo de CPU e banda sobe
+          bastante — considere fechar alguma.
         </div>
       )}
 

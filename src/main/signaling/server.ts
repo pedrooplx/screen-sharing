@@ -167,6 +167,17 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
     await this.close();
   }
 
+  /** Send one body to one connected peer. No-op if that peer is gone. */
+  sendTo(peerId: string, body: Body): void {
+    const link = this.#links.get(peerId);
+    if (!link) return;
+    try {
+      link.conn.send(body);
+    } catch {
+      /* the connection's own error handler will clean it up */
+    }
+  }
+
   broadcast(body: Body, exceptPeerId?: string): void {
     for (const link of this.#links.values()) {
       if (link.peerId === exceptPeerId) continue;

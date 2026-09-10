@@ -39,6 +39,9 @@ export interface SfuOptions {
 export interface SfuRouterEvents {
   'stream-live': [StreamInfo];
   'stream-ended': [{ streamId: string }];
+  /** subscriber count for a stream crossed 0<->1 - the owner should
+   *  start/stop encoding (selective forwarding, docs/DESIGN.md 8.5) */
+  'demand-changed': [{ streamId: string; ownerPeerId: string; subscribers: number }];
   error: [Error];
 }
 
@@ -210,7 +213,16 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
     });
 
     this.#subscriptions.set(key, { pc, disposers });
+    this.#emitDemand(streamId, pub.info.ownerPeerId);
     return { offerSdp: mustSdp(pc) };
+  }
+
+  #emitDemand(streamId: string, ownerPeerId: string): void {
+    this.emit('demand-changed', {
+      streamId,
+      ownerPeerId,
+      subscribers: this.subscriberCount(streamId),
+    });
   }
 
   async completeSubscribe(
@@ -226,7 +238,10 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
   unsubscribe(subscriberPeerId: string, streamId: string): void {
     const key = subKey(subscriberPeerId, streamId);
     const sub = this.#subscriptions.get(key);
-    if (sub) this.#dropSubscription(key, sub);
+    if (!sub) return;
+    this.#dropSubscription(key, sub);
+    const pub = this.#publishers.get(streamId);
+    if (pub) this.#emitDemand(streamId, pub.info.ownerPeerId);
   }
 
   #dropSubscription(key: string, sub: Subscription): void {
@@ -242,8 +257,16 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
     for (const [streamId, pub] of this.#publishers) {
       if (pub.info.ownerPeerId === peerId) this.unpublish(streamId);
     }
+    const touched = new Set<string>();
     for (const [key, sub] of this.#subscriptions) {
-      if (key.startsWith(`${peerId}::`)) this.#dropSubscription(key, sub);
+      if (key.startsWith(`${peerId}::`)) {
+        this.#dropSubscription(key, sub);
+        touched.add(key.slice(peerId.length + 2));
+      }
+    }
+    for (const streamId of touched) {
+      const pub = this.#publishers.get(streamId);
+      if (pub) this.#emitDemand(streamId, pub.info.ownerPeerId);
     }
   }
 

@@ -4,7 +4,9 @@
  * calls these channels through the `window.erros` bridge (see src/preload).
  */
 
-import type { RosterEntry } from './protocol.js';
+import type { Body, RosterEntry, StreamInfo } from './protocol.js';
+
+export type { StreamInfo, RosterEntry } from './protocol.js';
 
 export type SessionPhase =
   | 'idle'
@@ -36,6 +38,7 @@ export interface SessionSnapshot {
   readonly code: string | null;
   readonly codeStatus: RoomCodeStatus | null;
   readonly roster: RosterEntry[];
+  readonly streams: StreamInfo[];
   readonly notice: string | null;
 }
 
@@ -74,8 +77,10 @@ export const IPC = {
   getSnapshot: 'session:snapshot',
   listSources: 'capture:list-sources',
   setSource: 'capture:set-source',
+  sendMedia: 'media:send',
   // main -> renderer
   onUpdate: 'session:update',
+  onMedia: 'media:event',
   onError: 'session:error',
 } as const;
 
@@ -90,4 +95,25 @@ export interface ErrosApi {
   listSources(): Promise<CaptureSource[]>;
   /** tell the main process which source the next getDisplayMedia() should use */
   setCaptureSource(id: string): Promise<IpcResult<null>>;
+  /** send a media negotiation body (publish_offer, subscribe, subscribe_answer, ...) */
+  sendMedia(body: MediaBody): void;
+  /** media bodies coming back (publish_answer, subscribe_offer, stream_state, media_error) */
+  onMedia(cb: (body: MediaBody) => void): () => void;
 }
+
+/** The media subset of the protocol `Body` union, used across the IPC bridge. */
+export type MediaBody = Extract<
+  Body,
+  {
+    type:
+      | 'publish_offer'
+      | 'publish_answer'
+      | 'unpublish'
+      | 'subscribe'
+      | 'subscribe_offer'
+      | 'subscribe_answer'
+      | 'unsubscribe'
+      | 'stream_state'
+      | 'media_error';
+  }
+>;

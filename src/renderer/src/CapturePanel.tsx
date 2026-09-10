@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CaptureSource } from '../../shared/ipc.js';
 import { type LocalCapture, startCapture, stopCapture } from './capture.js';
+import type { MediaEngine } from './rtc.js';
 
-export function CapturePanel() {
+export function CapturePanel({ media }: { media: MediaEngine }) {
   const [capture, setCapture] = useState<LocalCapture | null>(null);
   const [picking, setPicking] = useState(false);
   const [sources, setSources] = useState<CaptureSource[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  // attach / detach the preview stream
   useEffect(() => {
     const el = videoRef.current;
     if (el && capture) {
@@ -21,9 +21,6 @@ export function CapturePanel() {
     };
   }, [capture]);
 
-  // stop everything when the panel unmounts (e.g. leaving the room)
-  useEffect(() => () => stopCapture(capture), [capture]);
-
   // react to the OS "stop sharing" affordance ending the track
   useEffect(() => {
     if (!capture) return;
@@ -31,11 +28,12 @@ export function CapturePanel() {
     if (!track) return;
     const onEnded = () => {
       stopCapture(capture);
+      media.unpublish();
       setCapture(null);
     };
     track.addEventListener('ended', onEnded);
     return () => track.removeEventListener('ended', onEnded);
-  }, [capture]);
+  }, [capture, media]);
 
   const openPicker = async () => {
     setError(null);
@@ -55,6 +53,7 @@ export function CapturePanel() {
       const next = await startCapture(source);
       setCapture(next);
       setPicking(false);
+      await media.publish(next.stream);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -62,30 +61,27 @@ export function CapturePanel() {
 
   const stop = () => {
     stopCapture(capture);
+    media.unpublish();
     setCapture(null);
   };
 
   if (capture) {
+    const published = media.localStreamId !== null;
     return (
       <div className="card">
         <div className="stage-head">
-          <h2>Sua transmissão (prévia local)</h2>
+          <h2>Sua transmissão</h2>
           <button className="ghost" onClick={stop}>
             Parar
           </button>
         </div>
-        <video
-          ref={videoRef}
-          className="preview"
-          muted
-          autoPlay
-          playsInline
-        />
+        <video ref={videoRef} className="preview" muted autoPlay playsInline />
         <p className="muted" style={{ marginBottom: 0 }}>
           {capture.source.name}
-          {capture.hasAudio ? ' · com áudio do sistema' : ' · sem áudio'} — ainda
-          não está sendo enviada para ninguém (chega no próximo checkpoint).
+          {capture.hasAudio ? ' · com áudio do sistema' : ' · sem áudio'}
+          {published ? ' · no ar' : ' · negociando…'}
         </p>
+        {media.error && <div className="error">{media.error}</div>}
       </div>
     );
   }

@@ -14,11 +14,13 @@ import {
   type HostRoomRequest,
   type IpcResult,
   type JoinRoomRequest,
+  type MediaBody,
   type SessionSnapshot,
 } from '../../shared/ipc.js';
 import {
   hostRoomRequestSchema,
   joinRoomRequestSchema,
+  mediaBodySchema,
 } from '../../shared/ipc-schema.js';
 
 let session: RoomSession | null = null;
@@ -33,6 +35,7 @@ function idleSnapshot(): SessionSnapshot {
     code: null,
     codeStatus: null,
     roster: [],
+    streams: [],
     notice: null,
   };
 }
@@ -41,10 +44,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   const push = (snapshot: SessionSnapshot) => {
     getWindow()?.webContents.send(IPC.onUpdate, snapshot);
   };
+  const pushMedia = (body: MediaBody) => {
+    getWindow()?.webContents.send(IPC.onMedia, body);
+  };
 
   const attach = (s: RoomSession) => {
     session = s;
     s.on('update', push);
+    s.on('media', pushMedia);
     push(s.snapshot());
   };
 
@@ -131,6 +138,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       return { ok: true, value: null };
     },
   );
+
+  ipcMain.on(IPC.sendMedia, (_e, raw: unknown) => {
+    const parsed = mediaBodySchema.safeParse(raw);
+    if (!parsed.success) {
+      log.warn('sendMedia: rejected malformed body');
+      return;
+    }
+    void session?.sendMedia(parsed.data).catch((err) => {
+      log.error('sendMedia failed', err);
+    });
+  });
 }
 
 export async function shutdownSession(): Promise<void> {

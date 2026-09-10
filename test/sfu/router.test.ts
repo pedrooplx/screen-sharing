@@ -1,0 +1,193 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  MediaStreamTrack,
+  RTCPeerConnection,
+  RTCRtpCodecParameters,
+  RtpHeader,
+  RtpPacket,
+} from 'werift';
+import { SfuRouter, SfuError } from '../../src/main/sfu/router.js';
+
+const codecs = {
+  video: [
+    new RTCRtpCodecParameters({
+      mimeType: 'video/VP8',
+      clockRate: 90000,
+      rtcpFeedback: [
+        { type: 'nack' },
+        { type: 'nack', parameter: 'pli' },
+      ],
+      payloadType: 96,
+    }),
+  ],
+};
+
+let routers: SfuRouter[] = [];
+let pcs: RTCPeerConnection[] = [];
+
+afterEach(() => {
+  for (const r of routers) r.close();
+  for (const pc of pcs) {
+    try {
+      pc.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  routers = [];
+  pcs = [];
+});
+
+function clientPc(): RTCPeerConnection {
+  const pc = new RTCPeerConnection({ codecs });
+  pcs.push(pc);
+  return pc;
+}
+
+const until = async (pred: () => boolean, ms = 8000): Promise<void> => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > ms) throw new Error('timeout waiting for condition');
+    await new Promise((r) => setTimeout(r, 40));
+  }
+};
+
+/** A werift peer that publishes a synthetic 30fps video stream to the SFU. */
+async function publish(
+  router: SfuRouter,
+  peerId: string,
+  streamId: string,
+): Promise<() => void> {
+  const pc = clientPc();
+  const track = new MediaStreamTrack({ kind: 'video' });
+  pc.addTransceiver(track, { direction: 'sendonly' });
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitIce(pc);
+
+  const { answerSdp } = await router.publish(peerId, streamId, pc.localDescription!.sdp, {
+    video: true,
+    audio: false,
+  });
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+  let seq = 0;
+  let ts = 0;
+  const timer = setInterval(() => {
+    ts += 3000;
+    const header = new RtpHeader({
+      sequenceNumber: seq++ & 0xffff,
+      timestamp: ts >>> 0,
+      payloadType: 96,
+      ssrc: 0xaabbccdd,
+      marker: true,
+    });
+    try {
+      track.writeRtp(new RtpPacket(header, Buffer.alloc(200, 9)));
+    } catch {
+      /* not connected yet */
+    }
+  }, 33);
+  return () => clearInterval(timer);
+}
+
+async function subscribe(
+  router: SfuRouter,
+  peerId: string,
+  streamId: string,
+): Promise<{ received: () => number }> {
+  const pc = clientPc();
+  let received = 0;
+  pc.onTrack.subscribe((track) => {
+    track.onReceiveRtp.subscribe(() => {
+      received++;
+    });
+  });
+
+  const { offerSdp } = await router.subscribe(peerId, streamId);
+  await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await waitIce(pc);
+  await router.completeSubscribe(peerId, streamId, pc.localDescription!.sdp);
+
+  return { received: () => received };
+}
+
+function waitIce(pc: RTCPeerConnection, ms = 4000): Promise<void> {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    pc.iceGatheringStateChange.subscribe((s: string) => {
+      if (s === 'complete') {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+}
+
+describe('SfuRouter', () => {
+  it('forwards a publisher stream to one subscriber (werift <-> werift)', async () => {
+    const router = new SfuRouter();
+    routers.push(router);
+
+    const stopPub = await publish(router, 'p_pub', 's1');
+    expect(router.listStreams().map((s) => s.streamId)).toEqual(['s1']);
+
+    const sub = await subscribe(router, 'p_sub', 's1');
+    await until(() => sub.received() > 5);
+
+    expect(sub.received()).toBeGreaterThan(5);
+    expect(router.subscriberCount('s1')).toBe(1);
+    stopPub();
+  }, 20000);
+
+  it('rejects subscribing to an unknown stream', async () => {
+    const router = new SfuRouter();
+    routers.push(router);
+    await expect(router.subscribe('p_x', 'ghost')).rejects.toThrow(SfuError);
+  });
+
+  it('rejects a duplicate publish of the same streamId', async () => {
+    const router = new SfuRouter();
+    routers.push(router);
+    const stop = await publish(router, 'p_a', 'dup');
+    await expect(
+      router.publish('p_a', 'dup', 'v=0\r\n', { video: true, audio: false }),
+    ).rejects.toThrow(SfuError);
+    stop();
+  }, 20000);
+
+  it('unpublish ends the stream and tears down its subscriptions', async () => {
+    const router = new SfuRouter();
+    routers.push(router);
+    const ended: string[] = [];
+    router.on('stream-ended', ({ streamId }) => ended.push(streamId));
+
+    const stop = await publish(router, 'p_a', 's2');
+    await subscribe(router, 'p_b', 's2');
+    expect(router.subscriberCount('s2')).toBe(1);
+
+    router.unpublish('s2');
+    expect(router.listStreams()).toHaveLength(0);
+    expect(router.subscriberCount('s2')).toBe(0);
+    expect(ended).toEqual(['s2']);
+    stop();
+  }, 20000);
+
+  it('removePeer drops both the peer\'s stream and its subscriptions', async () => {
+    const router = new SfuRouter();
+    routers.push(router);
+    const stopA = await publish(router, 'p_a', 'sa');
+    const stopB = await publish(router, 'p_b', 'sb');
+    await subscribe(router, 'p_a', 'sb'); // a watches b
+
+    router.removePeer('p_a');
+    expect(router.listStreams().map((s) => s.streamId)).toEqual(['sb']);
+    expect(router.subscriberCount('sb')).toBe(0);
+    stopA();
+    stopB();
+  }, 20000);
+});

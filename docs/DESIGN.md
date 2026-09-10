@@ -15,9 +15,9 @@
 
 ## 0. Estado da implementação (leia primeiro numa nova sessão)
 
-**Fases 0, 1, 2 concluídas. Fase 3 em andamento — checkpoints 3.1 (Electron + renderer + roster) e 3.2 (captura local) prontos.**
+**Fases 0, 1, 2 concluídas. Fase 3 em andamento — checkpoints 3.1 (shell), 3.2 (captura local) e 3.3 (SFU + publish/subscribe) prontos.**
 
-**O que já existe e passa nos testes** (`npm test` → 117 testes, 17 arquivos; `npm run typecheck` limpo — Node + web; `npm audit` → 0 vulnerabilidades):
+**O que já existe e passa nos testes** (`npm test` → 122 testes, 18 arquivos; `npm run typecheck` limpo — Node + web; `npm audit` → 0 vulnerabilidades):
 
 | Área | Módulos | Status |
 |---|---|---|
@@ -29,7 +29,8 @@
 | Failover | `src/main/election/{succession,failover}.ts`, `src/main/net/heir-probe.ts`, `src/main/signaling/peer-node.ts` | ordem de sucessão determinística; `heir_probe` UDP autenticado por `w`; `Failover` (promote / re-home / reconnect / room-dead); `PeerNode` (participante completo); `host_transfer` gracioso |
 | Protocolo | `src/shared/protocol.ts` | todas as mensagens em `zod`; `epoch` no envelope e no `joined` |
 | **App shell (3.1)** | `src/main/index.ts`, `src/main/app/{room-session,ipc}.ts`, `src/preload/index.ts`, `src/renderer/` | Electron + React (pt-BR); `RoomSession` (criar/entrar, une host↔peer); IPC tipado por `window.erros`; lobby + tela de sala com roster ao vivo, código, status de rede. `npm run dev` sobe tudo |
-| **Captura local (3.2)** | `src/main/app/capture.ts`, `src/renderer/src/{capture.ts,CapturePanel.tsx}` | listar telas/janelas com thumbnail, `setDisplayMediaRequestHandler` com áudio de sistema (`audio: 'loopback'`), prévia local em `<video>`. **Ainda não publica** — o stream não sai da máquina |
+| **Captura local (3.2)** | `src/main/app/capture.ts`, `src/renderer/src/{capture.ts,CapturePanel.tsx}` | listar telas/janelas com thumbnail, `setDisplayMediaRequestHandler` com áudio de sistema (`audio: 'loopback'`), prévia local em `<video>` |
+| **SFU + mídia (3.3)** | `src/main/sfu/{router,codecs,media-plane}.ts`, `src/renderer/src/{rtc.ts,StreamsPanel.tsx}` | mini-SFU werift no `main`: 1 PC por publisher, 1 por assinatura; encaminha RTP sem transcodificar; PLI ao primeiro pacote. Negociação **non-trickle** (junta ICE, manda SDP). Mensagens `publish_offer`/`publish_answer`/`subscribe`/`subscribe_offer`/`subscribe_answer`/`unpublish`/`unsubscribe`/`stream_state` no `bodySchema`. Renderer: `useMedia()` hook — publica a captura, assina streams, `<video>` por assinatura. **werift↔werift testado** (`test/sfu/router.test.ts`); **werift↔Chromium só valida com o app real** (ver docs/TESTING-MEDIA.md) |
 | Spike | `scripts/spike-sfu-throughput.mts`, `docs/SPIKE-SFU.md` | werift sustenta ~6.200 pkt/s a ~64% de um núcleo (pior caso) |
 | Ferramenta | `scripts/check-network.mts` (`npm run check:network`) | roda STUN+NAT+geração de código na rede real |
 
@@ -763,10 +764,12 @@ Ao fim da Fase 1 o entregável demonstrável é: três instâncias em redes dife
 
 1. ✅ **Electron + renderer mínimo** que só mostra o roster (via IPC). Loop "app roda, vejo a sala" fechado. `src/main/index.ts`, `src/main/app/{room-session,ipc}.ts`, `src/preload/index.ts`, `src/renderer/`. Teste: `test/app/room-session.test.ts`.
 2. ✅ **Captura local.** `src/main/app/capture.ts`: `listSources()` (desktopCapturer → `CaptureSource[]` com thumbnails) + `registerCaptureHandler()` (`setDisplayMediaRequestHandler` → `{ video: fonte escolhida, audio: 'loopback' }`, `useSystemPicker: false`). IPC `capture:list-sources` / `capture:set-source`. Renderer: `src/renderer/src/{capture.ts,CapturePanel.tsx}` — botão → grade de fontes → `getDisplayMedia` → `<video muted>` de prévia local (não publicada ainda). `setPermissionRequestHandler`/`setPermissionCheckHandler` liberam só `media` + `display-capture`. Fallback vídeo-sem-áudio se o pedido combinado falhar. **Não testável headless** (precisa de desktop real) — validado só visualmente com o mock.
-3. **Publisher → SFU → 1 assinante**, tudo local (host + 2 renderers na mesma máquina). É aqui que a **interop werift↔Chromium** é validada de verdade (pergunta aberta #3). Se quebrar, decidir `mediasoup` antes de ir adiante. **Aqui a captura de 3.2 deixa de ser prévia:** o `MediaStreamTrack` do `getDisplayMedia` vira o `track` de um `RTCPeerConnection` no renderer que oferece SDP para o SFU no `main`.
-4. **Encaminhamento seletivo** + `publishing` no roster + UI de lista/seleção. O roster row do renderer já tem o slot do badge "transmitindo".
+3. ✅ **Publisher → SFU → 1 assinante.** `src/main/sfu/router.ts` (`SfuRouter`: `publish`/`subscribe`/`unpublish`/`unsubscribe`/`removePeer`, 1 werift PC por lado, forward de `RtpPacket` direto, PLI no primeiro pacote); `codecs.ts` (VP8/VP9/H264 + Opus); `media-plane.ts` (`SfuMediaPlane` — traduz `Body` ↔ chamadas do router, `attachBroadcast` para `stream_state`). `SignalingServer` roteia mensagens de mídia via `opts.media`. `RoomSession` cria o SFU no host e faz passthrough no peer. Renderer: `useMedia()` + `StreamsPanel`. **Negociação non-trickle.** `test/sfu/router.test.ts` prova werift↔werift; a interop com o Chromium é `docs/TESTING-MEDIA.md` (roteiro manual, 2 instâncias).
+   - **Pendente de validação na máquina do usuário:** se a negociação werift↔Chromium falhar, plano B `mediasoup` — anotar a mensagem de erro do tile "assinatura falhou".
+   - **Ainda não feito neste checkpoint:** múltiplas assinaturas por peer com renegociação (hoje 1 sub-PC por streamId, recriado a cada mudança); ICE trickle; `announceIp`/`icePortRange` do werift ainda não validados para rede real.
+4. **Encaminhamento seletivo** já é a regra (sub sem assinante = sem PC) mas falta: `quality_directive{maxKbps:0}` para o transmissor desligar o encoder quando ninguém assiste; `publishing` no roster (hoje o badge "transmitindo" vem de `snapshot.streams`, não do roster).
 5. **Governor** (escada de qualidade, avisos de performance) + `stats_report`.
-6. **Restaurar estado de mídia no failover.**
+6. **Restaurar estado de mídia no failover.** Hoje `PeerNode.#applyAction` só reconecta o controle; o SFU do herdeiro promovido não existe ainda (o `SignalingServer` da promoção é criado sem `media`).
 7. **Teste de campo:** 2 transmitindo, 1 assistindo ambos, 1 assistindo um — em máquinas de casas diferentes.
 
 ### 17.2.1 Como o `RoomSession` funciona hoje (para estender)

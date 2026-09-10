@@ -29,6 +29,7 @@ import {
   RateLimiter,
   type RateLimitConfig,
 } from './rate-limit.js';
+import { type MediaPlane, isMediaMessage } from '../sfu/media-plane.js';
 import {
   type Body,
   type Envelope,
@@ -61,6 +62,8 @@ export interface SignalingServerOptions {
   readonly epoch?: number;
   /** peerId to advertise as the host (a promoted heir keeps its existing id) */
   readonly hostPeerId?: string;
+  /** the SFU; when present, media messages are routed to it */
+  readonly media?: MediaPlane;
 }
 
 export interface SignalingServerEvents {
@@ -309,6 +312,7 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
       epoch: this.#epoch,
       roomParams: this.#opts.roomParams,
       roster: this.#roster.snapshot(),
+      streams: this.#opts.media?.listStreams() ?? [],
     });
     this.broadcast({ type: 'roster_update', added: [entry], removed: [], changed: [] }, peerId);
     this.emit('peer-joined', { peerId, nickname: entry.nickname });
@@ -377,6 +381,10 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
         link.conn.close(1000, 'bye');
         break;
       default:
+        if (isMediaMessage(env.body.type) && this.#opts.media) {
+          void this.#handleMedia(peerId, env.body);
+          break;
+        }
         // join is only valid once; anything else here is unexpected for now
         this.emit(
           'error',
@@ -385,10 +393,17 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
     }
   }
 
+  async #handleMedia(peerId: string, body: Body): Promise<void> {
+    const reply = await this.#opts.media!.handleMessage(peerId, body);
+    const link = this.#links.get(peerId);
+    if (reply && link) link.conn.send(reply);
+  }
+
   #onPeerGone(peerId: string): void {
     const link = this.#links.get(peerId);
     if (link?.heartbeatTimer) clearInterval(link.heartbeatTimer);
     link?.heartbeat?.stop();
+    this.#opts.media?.onPeerGone(peerId);
     const removed = this.#roster.remove(peerId);
     this.#links.delete(peerId);
     if (!removed) return;

@@ -17,6 +17,7 @@ let state: SessionSnapshot = {
   code: null,
   codeStatus: null,
   roster: [],
+  streams: [],
   notice: null,
 };
 
@@ -48,6 +49,9 @@ export function installMock(): void {
           rosterEntry('p_host', nickname, 0, true, true),
           rosterEntry('p_a', 'ana', 1, false, true),
           rosterEntry('p_b', 'bruno', 2, false, false),
+        ],
+        streams: [
+          { streamId: 's_ana', ownerPeerId: 'p_a', video: true, audio: true },
         ],
       });
       return { ok: true, value: state };
@@ -90,6 +94,12 @@ export function installMock(): void {
     },
     async setCaptureSource() {
       return { ok: true, value: null };
+    },
+    sendMedia() {
+      /* no SFU in mock mode */
+    },
+    onMedia() {
+      return () => {};
     },
     onUpdate(cb) {
       listeners.add(cb);

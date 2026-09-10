@@ -129,6 +129,15 @@ export const joinSchema = z.object({
   }),
 });
 
+/** A stream currently published in the room. */
+export const streamInfoSchema = z.object({
+  streamId: z.string().min(1).max(64),
+  ownerPeerId: z.string().max(64),
+  video: z.boolean(),
+  audio: z.boolean(),
+});
+export type StreamInfo = z.infer<typeof streamInfoSchema>;
+
 export const joinedSchema = z.object({
   type: z.literal('joined'),
   peerId: z.string().max(64),
@@ -137,6 +146,7 @@ export const joinedSchema = z.object({
   epoch: z.number().int().nonnegative(),
   roomParams: roomParamsSchema,
   roster: z.array(rosterEntrySchema).max(64),
+  streams: z.array(streamInfoSchema).max(64),
 });
 
 /** Graceful handoff: the host is leaving and names its successor. */
@@ -174,6 +184,67 @@ export const byeSchema = z.object({
   reason: z.string().max(120),
 });
 
+// --- Media negotiation (docs/DESIGN.md section 7.3) -------------------
+//
+// Non-trickle ICE: each side gathers candidates before sending its SDP, so
+// there are no separate ICE-candidate messages yet. The peer is always the
+// offerer for publishing; the host (SFU) is always the offerer for subscribing.
+
+const SDP = z.string().min(1).max(60_000);
+
+/** peer -> host: I want to publish; here is my offer. streamId is peer-chosen. */
+export const publishOfferSchema = z.object({
+  type: z.literal('publish_offer'),
+  streamId: z.string().min(1).max(64),
+  video: z.boolean(),
+  audio: z.boolean(),
+  sdp: SDP,
+});
+export const publishAnswerSchema = z.object({
+  type: z.literal('publish_answer'),
+  streamId: z.string().min(1).max(64),
+  sdp: SDP,
+});
+export const unpublishSchema = z.object({
+  type: z.literal('unpublish'),
+  streamId: z.string().min(1).max(64),
+});
+
+/** peer -> host: start sending me this stream. */
+export const subscribeSchema = z.object({
+  type: z.literal('subscribe'),
+  streamId: z.string().min(1).max(64),
+});
+/** host -> peer: here is the SFU's offer for the stream you asked for. */
+export const subscribeOfferSchema = z.object({
+  type: z.literal('subscribe_offer'),
+  streamId: z.string().min(1).max(64),
+  sdp: SDP,
+});
+export const subscribeAnswerSchema = z.object({
+  type: z.literal('subscribe_answer'),
+  streamId: z.string().min(1).max(64),
+  sdp: SDP,
+});
+export const unsubscribeSchema = z.object({
+  type: z.literal('unsubscribe'),
+  streamId: z.string().min(1).max(64),
+});
+
+/** host -> everyone: a stream started or ended. */
+export const streamStateSchema = z.object({
+  type: z.literal('stream_state'),
+  stream: streamInfoSchema,
+  state: z.enum(['live', 'ended']),
+});
+
+/** host -> peer: media negotiation failed; drop the local PC for this stream. */
+export const mediaErrorSchema = z.object({
+  type: z.literal('media_error'),
+  streamId: z.string().min(1).max(64),
+  reason: z.string().max(160),
+});
+
 export const bodySchema = z.discriminatedUnion('type', [
   joinSchema,
   joinedSchema,
@@ -183,6 +254,15 @@ export const bodySchema = z.discriminatedUnion('type', [
   pingSchema,
   pongSchema,
   byeSchema,
+  publishOfferSchema,
+  publishAnswerSchema,
+  unpublishSchema,
+  subscribeSchema,
+  subscribeOfferSchema,
+  subscribeAnswerSchema,
+  unsubscribeSchema,
+  streamStateSchema,
+  mediaErrorSchema,
 ]);
 export type Body = z.infer<typeof bodySchema>;
 

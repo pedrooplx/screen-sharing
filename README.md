@@ -100,11 +100,11 @@ Estrutura em `src/`:
 | `src/main/room/` | código da sala (Base32 Crockford + CRC-16) + orquestrador STUN/NAT |
 | `src/main/election/` | ordem de sucessão determinística + coordenador de failover |
 | `src/main/signaling/` | servidor (host), cliente (peer), roster, heartbeat, `PeerNode` |
-| `src/main/app/` | `RoomSession` (une host↔peer) + handlers de IPC |
+| `src/main/app/` | `RoomSession` (une host↔peer), IPC, captura de tela |
+| `src/main/sfu/` | mini-SFU werift: `router`, `codecs`, `media-plane` |
 | `src/main/index.ts` | entry do processo principal do Electron |
 | `src/preload/` | ponte `contextBridge` → `window.erros` |
-| `src/renderer/` | UI React em pt-BR |
-| `src/main/sfu/` | *(Fase 3)* roteador werift, forwarder RTP, governor |
+| `src/renderer/` | UI React em pt-BR (`useMedia` para o WebRTC) |
 
 Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localhost:5173/?mock`
 (um stub de `window.erros` com dados de exemplo).
@@ -145,9 +145,12 @@ Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localh
         código e status de rede. `npm run dev`. Testes: `test/app/room-session.test.ts`.
   - [x] Captura de tela/janela + áudio do sistema (WASAPI loopback): seletor de
         fontes com miniatura e prévia local em `<video>` (`CapturePanel`).
-        O stream ainda não é publicado.
-  - [ ] Mini-SFU werift no `main`; publisher → SFU → assinante (valida interop com o Chromium).
-  - [ ] Encaminhamento seletivo + `publishing` no roster + UI de seleção.
+  - [x] Mini-SFU werift no `main` (`src/main/sfu/`); publish/subscribe ponta a
+        ponta com encaminhamento RTP sem transcodificar. `useMedia()` +
+        `StreamsPanel` no renderer. werift↔werift testado; **interop com o
+        Chromium: rodar `docs/TESTING-MEDIA.md`** com o app real.
+  - [ ] Múltiplas assinaturas por peer com renegociação; ICE trickle.
+  - [ ] `quality_directive` para desligar encoder sem espectadores.
   - [ ] Governor (escada de qualidade, avisos de performance) + `stats_report`.
   - [ ] Restaurar estado de mídia após failover.
 - [ ] **Fase 4** — Empacotamento (electron-builder) e robustez.

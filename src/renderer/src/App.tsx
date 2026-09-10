@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SessionSnapshot } from '../../shared/ipc.js';
 import type { RosterEntry } from '../../shared/protocol.js';
 import { CapturePanel } from './CapturePanel.js';
+import { StreamsPanel } from './StreamsPanel.js';
+import { useMedia } from './rtc.js';
 
 const IDLE: SessionSnapshot = {
   phase: 'idle',
@@ -12,6 +14,7 @@ const IDLE: SessionSnapshot = {
   code: null,
   codeStatus: null,
   roster: [],
+  streams: [],
   notice: null,
 };
 
@@ -172,6 +175,7 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
 function Room({ snap }: { snap: SessionSnapshot }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | undefined>(undefined);
+  const media = useMedia(snap.streams);
 
   const copy = useCallback(() => {
     if (!snap.code) return;
@@ -211,7 +215,14 @@ function Room({ snap }: { snap: SessionSnapshot }) {
         </div>
       )}
 
-      <CapturePanel />
+      <CapturePanel media={media} />
+
+      <StreamsPanel
+        media={media}
+        streams={snap.streams}
+        roster={snap.roster}
+        selfPeerId={snap.selfPeerId}
+      />
 
       <div className="card">
         <h2>Participantes ({snap.roster.length})</h2>
@@ -219,7 +230,12 @@ function Room({ snap }: { snap: SessionSnapshot }) {
           {[...snap.roster]
             .sort((a, b) => a.joinSeq - b.joinSeq)
             .map((e) => (
-              <RosterRow key={e.peerId} e={e} self={e.peerId === snap.selfPeerId} />
+              <RosterRow
+                key={e.peerId}
+                e={e}
+                self={e.peerId === snap.selfPeerId}
+                publishing={snap.streams.some((s) => s.ownerPeerId === e.peerId)}
+              />
             ))}
         </ul>
       </div>
@@ -227,7 +243,15 @@ function Room({ snap }: { snap: SessionSnapshot }) {
   );
 }
 
-function RosterRow({ e, self }: { e: RosterEntry; self: boolean }) {
+function RosterRow({
+  e,
+  self,
+  publishing,
+}: {
+  e: RosterEntry;
+  self: boolean;
+  publishing: boolean;
+}) {
   return (
     <li>
       <div className="avatar">{e.nickname.slice(0, 2).toUpperCase()}</div>
@@ -236,7 +260,7 @@ function RosterRow({ e, self }: { e: RosterEntry; self: boolean }) {
         {self && <span className="muted"> (você)</span>}
       </span>
       {e.isHost && <span className="badge host">host</span>}
-      {e.publishing && <span className="badge">transmitindo</span>}
+      {publishing && <span className="badge live">transmitindo</span>}
       {!e.isHost && (
         <span className="badge" title="alcançável de fora (candidato a host)">
           {e.inboundVerified ? '✓ alcançável' : '— sem porta'}

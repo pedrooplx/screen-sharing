@@ -18,7 +18,8 @@ import { Failover, type FailoverAction } from '../election/failover.js';
 import { SignalingClient } from './client.js';
 import { SignalingServer } from './server.js';
 import { encodeRoomCode } from '../room/room-code.js';
-import type { RoomParams, RosterEntry } from '../../shared/protocol.js';
+import type { MediaBody } from '../../shared/ipc.js';
+import type { RoomParams, RosterEntry, StreamInfo } from '../../shared/protocol.js';
 
 export interface PeerNodeOptions {
   readonly host: string;
@@ -48,6 +49,9 @@ export interface PeerNodeOptions {
 
 export interface PeerNodeEvents {
   roster: [RosterEntry[]];
+  streams: [StreamInfo[]];
+  /** media negotiation body from the host */
+  media: [MediaBody];
   /** this node became the host; `code` is the new room code (null if not resolved) */
   promoted: [{ epoch: number; code: string | null }];
   /** this node re-homed to a new host */
@@ -89,6 +93,14 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
   }
   get isHost(): boolean {
     return this.#isHost;
+  }
+  get streams(): StreamInfo[] {
+    return this.#client?.streams ?? [];
+  }
+
+  /** Send a media negotiation body to the current host's SFU. */
+  sendMedia(body: MediaBody): void {
+    this.#client?.send(body);
   }
 
   async start(): Promise<void> {
@@ -156,12 +168,15 @@ export class PeerNode extends EventEmitter<PeerNodeEvents> {
     this.#roomParams = result.roomParams;
     this.#refreshResponder();
     this.emit('roster', this.#roster);
+    this.emit('streams', result.streams);
 
     client.on('roster', (roster) => {
       this.#roster = roster;
       this.#refreshResponder();
       this.emit('roster', roster);
     });
+    client.on('streams', (streams) => this.emit('streams', streams));
+    client.on('media', (body) => this.emit('media', body));
     client.on('host-lost', () => this.#beginFailover());
     client.on('host-transfer', ({ successorPeerId, epoch }) => {
       this.#ensureFailover();

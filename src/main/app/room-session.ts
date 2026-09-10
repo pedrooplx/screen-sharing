@@ -23,12 +23,15 @@ import { decodeRoomCode, encodeRoomCode } from '../room/room-code.js';
 import { discoverExternalAddress } from '../net/stun.js';
 import { SignalingServer } from '../signaling/server.js';
 import { PeerNode } from '../signaling/peer-node.js';
+import { SfuMediaPlane } from '../sfu/media-plane.js';
+import { primaryLanIpv4 } from '../net/local-ip.js';
 import type {
+  MediaBody,
   RoomCodeStatus,
   SessionPhase,
   SessionSnapshot,
 } from '../../shared/ipc.js';
-import type { RoomParams, RosterEntry } from '../../shared/protocol.js';
+import type { RoomParams, RosterEntry, StreamInfo } from '../../shared/protocol.js';
 
 const DEFAULT_ROOM_PARAMS: RoomParams = {
   maxParticipants: 12,
@@ -38,6 +41,8 @@ const DEFAULT_ROOM_PARAMS: RoomParams = {
 
 export interface RoomSessionEvents {
   update: [SessionSnapshot];
+  /** a media negotiation body destined for this participant's renderer */
+  media: [MediaBody];
 }
 
 export interface HostOptions {
@@ -80,6 +85,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
   #argonParams: ArgonParams | undefined;
   #server: SignalingServer | undefined;
   #node: PeerNode | undefined;
+  #media: SfuMediaPlane | undefined;
   #closeMapping: (() => Promise<void>) | undefined;
 
   private constructor() {
@@ -191,6 +197,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     this.#phase = 'left';
     if (this.#node) await this.#node.stop().catch(() => {});
     if (this.#server) await this.#server.close().catch(() => {});
+    this.#media?.close();
     if (this.#closeMapping) await this.#closeMapping().catch(() => {});
     if (this.#w) wipe(this.#w);
     this.#w = null;
@@ -212,6 +219,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       code: this.#code,
       codeStatus: this.#codeStatus,
       roster,
+      streams: this.streams,
       notice: this.#notice,
     };
   }
@@ -224,6 +232,15 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     port: number,
     bindAddress: string,
   ): Promise<void> {
+    const announceIp =
+      this.#codeStatus && !this.#codeStatus.directlyReachable
+        ? this.#codeStatus.externalAddress
+        : (primaryLanIpv4() ?? undefined);
+    const media = new SfuMediaPlane({
+      ...(announceIp ? { announceIp } : {}),
+    });
+    this.#media = media;
+
     const server = new SignalingServer({
       roomId,
       w: this.#w!,
@@ -232,7 +249,14 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       port,
       bindAddress,
       verifyInbound: true,
+      media,
       ...(this.#argonParams ? { argonParams: this.#argonParams } : {}),
+    });
+    // stream_state goes to remote peers AND the host's own renderer
+    media.attachBroadcast((body) => {
+      server.broadcast(body);
+      this.emit('media', body);
+      this.#emit();
     });
     server.on('peer-joined', () => this.#emit());
     server.on('peer-left', () => this.#emit());
@@ -241,8 +265,36 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     this.#server = server;
   }
 
+  // --- media (driven by the renderer through IPC) --------------------
+
+  get streams(): StreamInfo[] {
+    if (this.#isHost) return this.#media?.listStreams() ?? [];
+    return this.#node?.streams ?? [];
+  }
+
+  /** The renderer's local peer id for SFU calls (host uses the host id). */
+  #selfPeerId(): string {
+    return this.#isHost
+      ? (this.#server?.hostPeerId ?? 'host')
+      : (this.#node?.peerId ?? '');
+  }
+
+  async sendMedia(body: MediaBody): Promise<void> {
+    if (this.#isHost && this.#media) {
+      const reply = await this.#media.handleMessage(this.#selfPeerId(), body);
+      if (reply) {
+        this.emit('media', reply);
+        this.#emit();
+      }
+      return;
+    }
+    this.#node?.sendMedia(body);
+  }
+
   #wireNode(node: PeerNode): void {
     node.on('roster', () => this.#emit());
+    node.on('streams', () => this.#emit());
+    node.on('media', (body) => this.emit('media', body));
     node.on('promoted', ({ code }) => {
       this.#isHost = true;
       this.#phase = 'hosting';

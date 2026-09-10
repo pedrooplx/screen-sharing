@@ -10,11 +10,13 @@ import { Connection } from '../net/connection.js';
 import { type ArgonParams, derivePasswordKey, deriveArgonSalt } from '../crypto/kdf.js';
 import { HandshakeError, runPeerHandshake } from './handshake.js';
 import { Heartbeat } from './heartbeat.js';
+import type { MediaBody } from '../../shared/ipc.js';
 import {
   type Body,
   type Envelope,
   type RoomParams,
   type RosterEntry,
+  type StreamInfo,
   ProtocolError,
 } from '../../shared/protocol.js';
 
@@ -44,6 +46,10 @@ export interface SignalingClientOptions {
 export interface SignalingClientEvents {
   roster: [RosterEntry[]];
   message: [Envelope];
+  /** a media negotiation body from the host (publish_answer, subscribe_offer, ...) */
+  media: [MediaBody];
+  /** the set of published streams changed */
+  streams: [StreamInfo[]];
   /** the host stopped answering heartbeats; the owner drives failover */
   'host-lost': [];
   /** the host named a successor before leaving */
@@ -56,6 +62,7 @@ export interface JoinResult {
   readonly peerId: string;
   readonly roomParams: RoomParams;
   readonly roster: RosterEntry[];
+  readonly streams: StreamInfo[];
 }
 
 export class SignalingClient extends EventEmitter<SignalingClientEvents> {
@@ -63,6 +70,7 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
   #conn: Connection | undefined;
   #peerId = '';
   #roster: RosterEntry[] = [];
+  #streams: StreamInfo[] = [];
   #epoch = 0;
   #heartbeat: Heartbeat | undefined;
   #heartbeatTimer: NodeJS.Timeout | undefined;
@@ -142,13 +150,20 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
     });
     conn.on('error', (err) => this.emit('error', err));
 
+    this.#streams = joined.streams;
     this.#startHeartbeat(conn);
     this.emit('roster', this.#roster);
+    this.emit('streams', this.#streams);
     return {
       peerId: joined.peerId,
       roomParams: joined.roomParams,
       roster: joined.roster,
+      streams: joined.streams,
     };
+  }
+
+  get streams(): StreamInfo[] {
+    return this.#streams;
   }
 
   send(body: Body): void {
@@ -269,6 +284,23 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
       case 'bye':
         this.#stopHeartbeat();
         this.emit('close', { code: 1000, reason: env.body.reason });
+        break;
+      case 'stream_state': {
+        const { stream, state } = env.body;
+        this.#streams =
+          state === 'ended'
+            ? this.#streams.filter((s) => s.streamId !== stream.streamId)
+            : [
+                ...this.#streams.filter((s) => s.streamId !== stream.streamId),
+                stream,
+              ];
+        this.emit('streams', this.#streams);
+        break;
+      }
+      case 'publish_answer':
+      case 'subscribe_offer':
+      case 'media_error':
+        this.emit('media', env.body);
         break;
       default:
         this.emit('message', env);

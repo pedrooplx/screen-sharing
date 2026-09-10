@@ -1,0 +1,43 @@
+{
+  "name": "erros-share",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Compartilhamento de tela P2P multi-transmissor, sem infraestrutura propria mantida no ar",
+  "license": "MIT",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build:app": "electron-vite build",
+    "start": "electron-vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.web.json",
+    "check:network": "tsx scripts/check-network.mts",
+    "spike:sfu": "tsx scripts/spike-sfu-throughput.mts"
+  },
+  "dependencies": {
+    "@achingbrain/nat-port-mapper": "^4.0.5",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "default-gateway": "^7.2.2",
+    "electron-log": "^5.4.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "werift": "^0.24.4",
+    "ws": "^8.21.3",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.3.0",
+    "electron-vite": "^5.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "vitest": "^5.0.0"
+  }
+}

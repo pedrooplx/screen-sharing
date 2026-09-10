@@ -151,7 +151,9 @@ Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localh
         ninguém assiste, restaura quando volta. Aviso ao assistir muitos fluxos.
         werift↔werift testado; **interop com o Chromium: rodar
         `docs/TESTING-MEDIA.md`** com o app real.
-  - [ ] Governor completo: escada de qualidade progressiva + `stats_report`.
+  - [x] Governor de qualidade: escada 1080p30→720p→480p, degradação por
+        perda/CPU medida (`stats_report` a cada 4 s), recuperação gradual.
+  - [ ] Restaurar mídia após failover (o herdeiro promovido ainda não tem SFU).
   - [ ] ICE trickle (hoje non-trickle — junta candidatos e manda o SDP).
   - [ ] Governor (escada de qualidade, avisos de performance) + `stats_report`.
   - [ ] Restaurar estado de mídia após failover.

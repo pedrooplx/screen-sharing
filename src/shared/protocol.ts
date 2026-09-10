@@ -255,7 +255,35 @@ export const qualityDirectiveSchema = z.object({
   streamId: z.string().min(1).max(64),
   maxKbps: z.number().int().min(0).max(20_000),
   maxFps: z.number().int().min(0).max(120),
+  /** RTCRtpEncodingParameters.scaleResolutionDownBy (>= 1) */
+  scaleDownBy: z.number().min(1).max(8),
   reason: z.enum(['no_viewers', 'restored', 'bandwidth', 'cpu']),
+});
+
+/** peer -> host: periodic quality telemetry for the governor (section 8.5). */
+export const statsReportSchema = z.object({
+  type: z.literal('stats_report'),
+  subscriptions: z
+    .array(
+      z.object({
+        streamId: z.string().min(1).max(64),
+        fractionLost: z.number().min(0).max(1),
+        jitterMs: z.number().min(0).max(10_000),
+        rttMs: z.number().min(0).max(10_000),
+        fps: z.number().min(0).max(240),
+      }),
+    )
+    .max(32),
+  publications: z
+    .array(
+      z.object({
+        streamId: z.string().min(1).max(64),
+        /** 1 when Chromium reports qualityLimitationReason === 'cpu' */
+        cpuPressure: z.number().min(0).max(1),
+        fps: z.number().min(0).max(240),
+      }),
+    )
+    .max(8),
 });
 
 export const bodySchema = z.discriminatedUnion('type', [
@@ -277,6 +305,7 @@ export const bodySchema = z.discriminatedUnion('type', [
   streamStateSchema,
   mediaErrorSchema,
   qualityDirectiveSchema,
+  statsReportSchema,
 ]);
 export type Body = z.infer<typeof bodySchema>;
 

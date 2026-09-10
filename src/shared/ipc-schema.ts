@@ -6,6 +6,7 @@ import {
   publishAnswerSchema,
   publishOfferSchema,
   qualityDirectiveSchema,
+  statsReportSchema,
   streamStateSchema,
   subscribeAnswerSchema,
   subscribeOfferSchema,
@@ -39,4 +40,5 @@ export const mediaBodySchema = z.discriminatedUnion('type', [
   streamStateSchema,
   mediaErrorSchema,
   qualityDirectiveSchema,
+  statsReportSchema,
 ]);

@@ -156,8 +156,10 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
                 params.encodings = params.encodings?.length
                   ? params.encodings
                   : [{}];
-                params.encodings[0]!.maxBitrate = body.maxKbps * 1000;
-                if (body.maxFps) params.encodings[0]!.maxFramerate = body.maxFps;
+                const enc = params.encodings[0]!;
+                enc.maxBitrate = body.maxKbps * 1000;
+                if (body.maxFps) enc.maxFramerate = body.maxFps;
+                enc.scaleResolutionDownBy = body.scaleDownBy;
                 void sender.setParameters(params).catch(() => {});
               }
             }
@@ -228,6 +230,82 @@ export function useMedia(streams: StreamInfo[]): MediaEngine {
       }
     }
   }, [streams, setRemoteStream]);
+
+  // periodic stats_report to the host's governor
+  useEffect(() => {
+    const prev = new Map<string, { lost: number; recv: number }>();
+    const timer = setInterval(async () => {
+      const subscriptions: Array<{
+        streamId: string;
+        fractionLost: number;
+        jitterMs: number;
+        rttMs: number;
+        fps: number;
+      }> = [];
+      for (const [streamId, pc] of subPcs.current) {
+        try {
+          const rep = await pc.getStats();
+          let lost = 0;
+          let recv = 0;
+          let jitterMs = 0;
+          let fps = 0;
+          let rttMs = 0;
+          rep.forEach((s) => {
+            if (s.type === 'inbound-rtp' && s.kind === 'video') {
+              lost = s.packetsLost ?? 0;
+              recv = s.packetsReceived ?? 0;
+              jitterMs = (s.jitter ?? 0) * 1000;
+              fps = s.framesPerSecond ?? 0;
+            }
+            if (s.type === 'candidate-pair' && s.nominated) {
+              rttMs = (s.currentRoundTripTime ?? 0) * 1000;
+            }
+          });
+          const p = prev.get(streamId) ?? { lost: 0, recv: 0 };
+          const dLost = Math.max(0, lost - p.lost);
+          const dRecv = Math.max(0, recv - p.recv);
+          prev.set(streamId, { lost, recv });
+          subscriptions.push({
+            streamId,
+            fractionLost: dLost + dRecv > 0 ? dLost / (dLost + dRecv) : 0,
+            jitterMs,
+            rttMs,
+            fps,
+          });
+        } catch {
+          /* PC not ready */
+        }
+      }
+
+      const publications: Array<{
+        streamId: string;
+        cpuPressure: number;
+        fps: number;
+      }> = [];
+      const localId = localIdRef.current;
+      if (localId && publishPc.current) {
+        try {
+          const rep = await publishPc.current.getStats();
+          let fps = 0;
+          let cpu = 0;
+          rep.forEach((s) => {
+            if (s.type === 'outbound-rtp' && s.kind === 'video') {
+              fps = s.framesPerSecond ?? 0;
+              cpu = s.qualityLimitationReason === 'cpu' ? 1 : 0;
+            }
+          });
+          publications.push({ streamId: localId, cpuPressure: cpu, fps });
+        } catch {
+          /* ignore */
+        }
+      }
+
+      if (subscriptions.length || publications.length) {
+        window.erros.sendMedia({ type: 'stats_report', subscriptions, publications });
+      }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, []);
 
   // teardown on unmount
   useEffect(

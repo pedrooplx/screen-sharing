@@ -117,6 +117,7 @@ export type MediaBody = Extract<
       | 'unsubscribe'
       | 'stream_state'
       | 'media_error'
-      | 'quality_directive';
+      | 'quality_directive'
+      | 'stats_report';
   }
 >;

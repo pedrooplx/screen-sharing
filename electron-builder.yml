@@ -45,7 +45,17 @@ publish: null
 win:
   icon: build/icon.ico
   target:
+    # nsis: the installer someone runs once and forgets - Start Menu entry,
+    # proper uninstall.
+    # portable: a single self-contained .exe with no install step at all -
+    # this is the one meant for handing someone a file to just double-click
+    # (it self-extracts to a temp dir and runs; nothing written to Program
+    # Files, no registry, no admin prompt, no uninstaller). Same app inside
+    # both - just packaging.
     - target: nsis
+      arch:
+        - x64
+    - target: portable
       arch:
         - x64
   # Every dependency was deliberately chosen to be pure JS (docs/DESIGN.md
@@ -60,3 +70,6 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: erros-share
   artifactName: '${productName}-Setup-${version}.${ext}'
+
+portable:
+  artifactName: '${productName}-Portable-${version}.${ext}'

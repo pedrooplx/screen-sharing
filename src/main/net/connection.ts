@@ -11,7 +11,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import type { WebSocket } from 'ws';
+import type { Transport } from './transport.js';
 import {
   Direction,
   FrameDecoder,
@@ -43,7 +43,7 @@ type InboxItem =
   | { ev: 'message'; data: Envelope };
 
 export class Connection extends EventEmitter<ConnectionEvents> {
-  readonly #ws: WebSocket;
+  readonly #transport: Transport;
   readonly #role: ConnectionRole;
   #encoder: FrameEncoder | undefined;
   #decoder: FrameDecoder | undefined;
@@ -57,9 +57,9 @@ export class Connection extends EventEmitter<ConnectionEvents> {
   epoch = 0;
   #seq = 0;
 
-  constructor(ws: WebSocket, role: ConnectionRole) {
+  constructor(transport: Transport, role: ConnectionRole) {
     super();
-    this.#ws = ws;
+    this.#transport = transport;
     this.#role = role;
 
     (this as EventEmitter).on('newListener', (event: string | symbol) => {
@@ -68,18 +68,18 @@ export class Connection extends EventEmitter<ConnectionEvents> {
       }
     });
 
-    ws.on('message', (data: Buffer, isBinary: boolean) => {
+    transport.onMessage((data, isBinary) => {
       try {
         this.#onMessage(data, isBinary);
       } catch (err) {
         this.#fail(err as Error);
       }
     });
-    ws.on('close', (code: number, reasonBuf: Buffer) => {
+    transport.onClose((code, reason) => {
       this.#closed = true;
-      this.emit('close', { code, reason: reasonBuf.toString() });
+      this.emit('close', { code, reason });
     });
-    ws.on('error', (err: Error) => this.#fail(err));
+    transport.onError((err) => this.#fail(err));
   }
 
   get encrypted(): boolean {
@@ -87,12 +87,12 @@ export class Connection extends EventEmitter<ConnectionEvents> {
   }
 
   get closed(): boolean {
-    return this.#closed;
+    return this.#closed || this.#transport.closed;
   }
 
   sendHandshake(msg: HandshakeMessage): void {
     if (this.encrypted) throw new ProtocolError('handshake after upgrade');
-    this.#ws.send(JSON.stringify(msg));
+    this.#transport.send(JSON.stringify(msg), false);
   }
 
   /**
@@ -132,17 +132,13 @@ export class Connection extends EventEmitter<ConnectionEvents> {
       body,
     };
     const frame = this.#encoder.encode(Buffer.from(JSON.stringify(envelope)));
-    this.#ws.send(frame, { binary: true });
+    this.#transport.send(frame, true);
   }
 
   close(code = 1000, reason = ''): void {
     if (this.#closed) return;
     this.#closed = true;
-    try {
-      this.#ws.close(code, reason);
-    } catch {
-      /* already gone */
-    }
+    this.#transport.close(code, reason);
   }
 
   #onMessage(data: Buffer, isBinary: boolean): void {

@@ -5,6 +5,7 @@ import { WebSocket } from 'ws';
 import { SignalingServer } from '../../src/main/signaling/server.js';
 import { SignalingClient } from '../../src/main/signaling/client.js';
 import { Connection } from '../../src/main/net/connection.js';
+import { WsTransport } from '../../src/main/net/transport.js';
 import { runPeerHandshake } from '../../src/main/signaling/handshake.js';
 import type { RoomParams } from '../../src/shared/protocol.js';
 
@@ -199,7 +200,7 @@ describe('signaling session (Phase 1)', () => {
       ws.once('open', () => res());
       ws.once('error', rej);
     });
-    const conn = new Connection(ws, 'peer');
+    const conn = new Connection(new WsTransport(ws), 'peer');
     await runPeerHandshake(conn, { roomId, deriveW: () => W });
     conn.outboundFrom = 'ghost';
     conn.send({

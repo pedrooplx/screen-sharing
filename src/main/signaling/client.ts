@@ -7,6 +7,7 @@
 import { EventEmitter } from 'node:events';
 import { WebSocket } from 'ws';
 import { Connection } from '../net/connection.js';
+import { WsTransport } from '../net/transport.js';
 import { type ArgonParams, derivePasswordKey, deriveArgonSalt } from '../crypto/kdf.js';
 import { HandshakeError, runPeerHandshake } from './handshake.js';
 import { Heartbeat } from './heartbeat.js';
@@ -112,7 +113,7 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
       });
     });
 
-    const conn = new Connection(ws, 'peer');
+    const conn = new Connection(new WsTransport(ws), 'peer');
     this.#conn = conn;
 
     await runPeerHandshake(conn, {

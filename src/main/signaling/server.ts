@@ -12,6 +12,7 @@ import { randomBytes } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { Connection } from '../net/connection.js';
+import { WsTransport } from '../net/transport.js';
 import { tcpReachable } from '../net/reachability.js';
 import {
   type ArgonParams,
@@ -224,7 +225,7 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
   }
 
   async #handleConnection(ws: WebSocket, ip: string): Promise<void> {
-    const conn = new Connection(ws, 'host');
+    const conn = new Connection(new WsTransport(ws), 'host');
     conn.outboundFrom = this.#hostPeerId;
     conn.epoch = this.#epoch;
 

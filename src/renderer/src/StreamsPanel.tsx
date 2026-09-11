@@ -57,28 +57,95 @@ function WatchTile({
   media: MediaEngine;
 }) {
   const ref = useRef<HTMLVideoElement | null>(null);
+  const homeRef = useRef<HTMLDivElement | null>(null);
+  const pipWindowRef = useRef<Window | null>(null);
   const remote = media.remote.get(stream.streamId) ?? null;
   const watching = media.isSubscribed(stream.streamId);
 
   useEffect(() => {
     const el = ref.current;
-    if (el && remote) {
+    if (el) {
       el.srcObject = remote;
-      void el.play().catch(() => {});
+      if (remote) void el.play().catch(() => {});
     }
     return () => {
       if (el) el.srcObject = null;
     };
   }, [remote]);
 
-  // A floating, always-on-top window the user can freely move and resize by
-  // dragging its edges - unlike Element.requestFullscreen(), which always
-  // takes over the entire screen at a fixed size and hides everything else.
-  // Falls back to fullscreen only if the platform genuinely has no
-  // Picture-in-Picture (document.pictureInPictureEnabled false).
-  const maximize = () => {
+  // The <video> below is always mounted (never swapped for the placeholder
+  // in JSX) precisely so this works: while floating, the real DOM node lives
+  // inside the detached PiP document, not under homeRef. If React ever tried
+  // to unmount/remount that exact node from here it would throw (it's not
+  // actually a child of this container anymore). Closing the window first
+  // restores the node home before anything else touches the tree.
+  useEffect(() => {
+    if (!remote) pipWindowRef.current?.close();
+  }, [remote]);
+  useEffect(() => () => pipWindowRef.current?.close(), []);
+
+  const restoreHome = () => {
+    const el = ref.current;
+    const home = homeRef.current;
+    if (el && home && el.parentElement !== home) home.appendChild(el);
+    pipWindowRef.current = null;
+  };
+
+  // A real floating window the user can resize freely, including all the
+  // way up to the full screen - unlike a plain video requestPictureInPicture(),
+  // which Chromium caps at roughly 80% of the screen's work area no matter
+  // how far you drag it. documentPictureInPicture opens an actual auxiliary
+  // window and lets us move the live <video> node into it directly (per
+  // Chrome's own documented pattern), so playback never interrupts.
+  // Falls back to basic video PiP, then to fullscreen, on older Chromium.
+  const maximize = async () => {
     const el = ref.current;
     if (!el) return;
+    const docPip = window.documentPictureInPicture;
+    if (docPip) {
+      try {
+        const pipWindow = await docPip.requestWindow({ width: 960, height: 540 });
+        Object.assign(pipWindow.document.body.style, {
+          margin: '0',
+          background: '#000',
+          height: '100vh',
+          overflow: 'hidden',
+        });
+        Object.assign(el.style, { width: '100%', height: '100%', objectFit: 'contain' });
+        pipWindow.document.body.append(el);
+        const closeBtn = pipWindow.document.createElement('button');
+        closeBtn.textContent = '✕';
+        Object.assign(closeBtn.style, {
+          position: 'fixed',
+          top: '8px',
+          right: '8px',
+          border: 'none',
+          borderRadius: '6px',
+          background: 'rgba(0,0,0,0.55)',
+          color: '#fff',
+          width: '28px',
+          height: '28px',
+          cursor: 'pointer',
+          font: '14px/1 sans-serif',
+        });
+        closeBtn.onclick = () => pipWindow.close();
+        pipWindow.document.body.append(closeBtn);
+        pipWindowRef.current = pipWindow;
+        pipWindow.addEventListener(
+          'pagehide',
+          () => {
+            el.style.removeProperty('width');
+            el.style.removeProperty('height');
+            el.style.removeProperty('object-fit');
+            restoreHome();
+          },
+          { once: true },
+        );
+        return;
+      } catch (err) {
+        console.error('documentPictureInPicture failed:', err);
+      }
+    }
     if (document.pictureInPictureEnabled && !el.disablePictureInPicture) {
       void el
         .requestPictureInPicture()
@@ -92,16 +159,16 @@ function WatchTile({
 
   return (
     <div className="watch-tile">
-      <div className="watch-video">
-        {remote ? (
-          <video
-            ref={ref}
-            autoPlay
-            playsInline
-            onDoubleClick={maximize}
-            title="Clique duas vezes para abrir numa janela flutuante"
-          />
-        ) : (
+      <div className="watch-video" ref={homeRef}>
+        <video
+          ref={ref}
+          autoPlay
+          playsInline
+          hidden={!remote}
+          onDoubleClick={remote ? () => void maximize() : undefined}
+          title="Clique duas vezes para abrir numa janela flutuante"
+        />
+        {!remote && (
           <div className="watch-placeholder">
             {watching ? (
               <>
@@ -118,7 +185,7 @@ function WatchTile({
         <span className="name">{owner}</span>
         <span className="watch-actions">
           {remote && (
-            <button className="ghost" onClick={maximize} title="Abrir numa janela flutuante">
+            <button className="ghost" onClick={() => void maximize()} title="Abrir numa janela flutuante">
               🗗
             </button>
           )}

@@ -72,7 +72,11 @@ function WatchTile({
   }, [remote]);
 
   const maximize = () => {
-    void ref.current?.requestFullscreen().catch(() => {});
+    // requires the 'fullscreen' permission granted in src/main/index.ts's
+    // setPermissionRequestHandler - without it this rejects silently.
+    void ref.current
+      ?.requestFullscreen()
+      .catch((err: Error) => console.error('requestFullscreen failed:', err));
   };
 
   return (

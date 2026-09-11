@@ -67,9 +67,13 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  // Lock down the renderer: allow only screen/window capture, deny everything
-  // else (geolocation, notifications, remote media devices, ...).
-  const allowed = new Set(['media', 'display-capture']);
+  // Lock down the renderer: allow only screen/window capture and fullscreen
+  // (StreamsPanel's "maximize" button - Element.requestFullscreen() is gated
+  // by this same permission, not just BrowserWindow's own fullscreenable;
+  // without it the call just rejects silently, which looked like the button
+  // "did nothing"), deny everything else (geolocation, notifications, remote
+  // media devices, ...).
+  const allowed = new Set(['media', 'display-capture', 'fullscreen']);
   electronSession.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
     cb(allowed.has(permission));
   });

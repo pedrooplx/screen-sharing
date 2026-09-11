@@ -130,6 +130,23 @@ Estrutura em `src/`:
 Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localhost:5173/?mock`
 (um stub de `window.erros` com dados de exemplo).
 
+## Gerar o instalador (Windows)
+
+```bash
+npm run dist:win
+```
+
+Gera `release/erros-share-Setup-<versão>.exe` (NSIS, x64) e a pasta
+`release/win-unpacked/` (o app descompactado, útil pra testar sem instalar).
+O ícone (`build/icon.ico`) e a config do empacotador
+([`electron-builder.yml`](electron-builder.yml)) já estão prontos — não precisa
+mexer em nada, só rodar o comando.
+
+**Sem assinatura de código**: o instalador e o `.exe` não são assinados (custa
+uma certificadora). O Windows SmartScreen vai avisar "o Windows protegeu o seu
+PC" no primeiro uso do instalador e do app — é esperado, clique em "Mais
+informações" → "Executar assim mesmo".
+
 ---
 
 ## Status por fase
@@ -170,8 +187,17 @@ Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localh
         mídia também descobre seu endereço de saída sem porta de entrada.
   - [x] Failover automático **parcado** (dependia de reconexão de host, que o
         relé v1 não oferece).
-- [ ] **Fase 4** — Empacotamento (electron-builder), URL de relé de produção
-      real (falta o deploy — próximo passo), e robustez.
+- [x] **Fase 4** — Empacotamento. `npm run dist:win` gera um instalador NSIS
+      Windows x64 (`electron-builder.yml`). Sem assinatura de código ainda —
+      o Windows SmartScreen avisa no primeiro uso, é esperado.
+  - [x] Ícone gerado do zero (`scripts/make-icon.mjs`, sem dependência de
+        imagem — hand-rolled PNG/ICO).
+  - [x] Dois bugs de empacotamento encontrados e corrigidos no primeiro build
+        real (docs/DESIGN.md §0, desvios 9 e 10): `main` precisa ser CommonJS
+        pra rodar de dentro do `.asar`; `werift` depende de um pacote que
+        vendoriza arquivos de um jeito que quebra dentro do asar
+        (`scripts/patch-binary-data.mjs` corrige depois de todo `npm install`).
+  - [ ] Assinatura de código (custa dinheiro, não incluído).
 
 ---
 

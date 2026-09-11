@@ -5,13 +5,25 @@
  * All the interesting work lives in src/main/{signaling,net,crypto,election,app}.
  */
 
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow, session as electronSession } from 'electron';
 import log from 'electron-log/main.js';
 import { registerIpc, shutdownSession } from './app/ipc.js';
 import { registerCaptureHandler } from './app/capture.js';
 
+// `import.meta.dirname` (not just `import.meta.url`) is a Node-specific
+// addition that bundler CJS interop does not reliably shim, and the packaged
+// build only executes as CJS - this crashed the packaged app with no error
+// anywhere (Electron just silently never ran main/index.cjs) while the exact
+// same build ran fine unpacked. dirname(fileURLToPath(...)) only relies on
+// import.meta.url, which Rollup's CJS output does shim correctly - see
+// electron.vite.config.ts.
+const here = dirname(fileURLToPath(import.meta.url));
+
 log.initialize();
+process.on('uncaughtException', (err) => log.error('uncaughtException (main)', err));
+process.on('unhandledRejection', (reason) => log.error('unhandledRejection (main)', reason));
 
 let window: BrowserWindow | null = null;
 
@@ -24,8 +36,13 @@ function createWindow(): void {
     show: false,
     backgroundColor: '#14161a',
     title: 'erros-share',
+    // no `icon:` here: the packaged .exe already carries build/icon.ico as a
+    // PE resource (electron-builder.yml `win.icon`), which Windows uses for
+    // the taskbar/title bar automatically. Setting a runtime icon path would
+    // need build/ inside the asar, which it deliberately isn't (build-time
+    // only input, not a runtime asset).
     webPreferences: {
-      preload: join(import.meta.dirname, '../preload/index.cjs'),
+      preload: join(here, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -37,12 +54,15 @@ function createWindow(): void {
   window.on('closed', () => {
     window = null;
   });
+  window.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    log.error('renderer failed to load', { code, desc, url });
+  });
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
   if (devUrl) {
     void window.loadURL(devUrl);
   } else {
-    void window.loadFile(join(import.meta.dirname, '../renderer/index.html'));
+    void window.loadFile(join(here, '../renderer/index.html'));
   }
 }
 
@@ -64,7 +84,7 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
+}).catch((err) => log.error('app.whenReady() rejected', err));
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

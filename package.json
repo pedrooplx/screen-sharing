@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Compartilhamento de tela P2P multi-transmissor; sinalizacao via rele hospedado, midia sempre P2P",
   "license": "MIT",
-  "main": "out/main/index.js",
+  "author": "Pedro Henrique",
+  "main": "out/main/index.cjs",
   "scripts": {
     "dev": "electron-vite dev",
     "build:app": "electron-vite build",
@@ -14,7 +15,10 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.web.json && npm run typecheck --prefix server",
     "check:network": "tsx scripts/check-network.mts",
-    "spike:sfu": "tsx scripts/spike-sfu-throughput.mts"
+    "spike:sfu": "tsx scripts/spike-sfu-throughput.mts",
+    "make:icon": "node scripts/make-icon.mjs",
+    "postinstall": "node scripts/patch-binary-data.mjs",
+    "dist:win": "node scripts/patch-binary-data.mjs && electron-vite build && electron-builder --win --x64"
   },
   "dependencies": {
     "@achingbrain/nat-port-mapper": "^4.0.5",
@@ -35,9 +39,14 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
     "vitest": "^5.0.0"
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true
   }
 }

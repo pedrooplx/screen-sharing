@@ -9,7 +9,16 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       outDir: 'out/main',
-      rollupOptions: { input: resolve(root, 'src/main/index.ts') },
+      rollupOptions: {
+        input: resolve(root, 'src/main/index.ts'),
+        // CommonJS, like the preload: an ESM main entry (the default under
+        // the package's "type": "module") never actually executes when
+        // loaded from inside an asar - Electron packaged builds silently
+        // fail to run it (nothing past the first line, no error anywhere)
+        // while the exact same file runs fine unpacked. Force .cjs so this
+        // isn't type-dependent.
+        output: { format: 'cjs', entryFileNames: 'index.cjs' },
+      },
     },
   },
   preload: {

@@ -1,0 +1,62 @@
+# electron-builder config (Fase 4, docs/DESIGN.md §12 decision: NSIS installer).
+# Run via `npm run dist:win` (electron-vite build, then this).
+
+appId: com.errosshare.app
+productName: erros-share
+copyright: Copyright (c) 2026 Pedro Henrique
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the compiled app + package.json + production node_modules - not the
+# source tree, tests, docs, the separate server/ package, or parked/ (none of
+# it is required at runtime; server/ in particular has its own full
+# node_modules that would otherwise double the installer size for nothing).
+files:
+  - out/**/*
+  - package.json
+  - node_modules/**/*
+  - '!server/**'
+  - '!parked/**'
+  - '!docs/**'
+  - '!scripts/**'
+  - '!test/**'
+  - '!src/**'
+
+# werift depends on @shinyoshiaki/binary-data, which used to vendor a private
+# copy of lib/types/internal via a nested node_modules under its own src/ (see
+# scripts/patch-binary-data.mjs, run by `npm run dist:win` before this) -
+# electron-builder's node_modules collector silently dropped that nested
+# node_modules no matter what `files`/`asarUnpack`/`extraResources` glob was
+# thrown at it (all three tried and confirmed insufficient by hand), because
+# it's declared nowhere as a real dependency for the collector to discover.
+# The patch renames it off the magic `node_modules` name instead, which is
+# both simpler than fighting the collector and packager-agnostic - unpacking
+# it below is no longer required for correctness, just consistent with the
+# rest of werift's dependency tree (pure JS, no native module rebuild needed
+# per docs/DESIGN.md §12 - nothing here truly *needs* to be outside the asar).
+asar: true
+
+# No auto-update wiring (docs/DESIGN.md §1: out of scope) - do not publish
+# anywhere, and do not require a GH_TOKEN or similar at build time.
+publish: null
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # Every dependency was deliberately chosen to be pure JS (docs/DESIGN.md
+  # §12) specifically so packaging needs no native module rebuild step.
+  requestedExecutionLevel: asInvoker
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: erros-share
+  artifactName: '${productName}-Setup-${version}.${ext}'

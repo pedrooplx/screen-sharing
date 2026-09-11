@@ -1,0 +1,25 @@
+# Deploy the erros-share signaling relay to Render (free tier).
+#
+#   1. Fork this repo (or push it) to your GitHub account.
+#   2. On https://dashboard.render.com → New → Blueprint → pick the repo.
+#      Render reads this file (it lives in server/, set Root Directory = server
+#      if it doesn't detect it).
+#   3. Deploy. Copy the service URL, e.g. https://erros-share-relay.onrender.com
+#   4. In the app, set the relay URL to wss://<that host> (Settings, or the
+#      ERROS_RELAY_URL env var when running from source).
+#
+# Free tier: sleeps after 15 min idle, ~40 s cold start. The app retries the
+# first connection and pings while a room is live so it won't sleep mid-session.
+
+services:
+  - type: web
+    name: erros-share-relay
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production

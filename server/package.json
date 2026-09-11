@@ -1,0 +1,24 @@
+{
+  "name": "erros-share-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Signaling relay for erros-share (relays opaque bytes only)",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.21.3",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.7.0"
+  }
+}

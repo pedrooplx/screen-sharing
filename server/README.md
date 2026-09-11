@@ -37,12 +37,15 @@ ferramentas de build como dependência normal. Custo: uns poucos MB extras em
 
 ## Deploy no Render (grátis)
 
-Veja [`render.yaml`](render.yaml). Resumo: fork do repo → Render → New → Blueprint
-→ escolha o repo (Root Directory = `server`) → Deploy. Copie a URL (`https://<host>`)
-e aponte o app para `wss://<host>` via a variável de ambiente `ERROS_RELAY_URL`
-(veja `src/main/net/relay-config.ts` no repo raiz) — hoje isso ainda não é
-automático no build de produção; até lá, `DEFAULT_RELAY_URL` naquele arquivo é
-só um placeholder e precisa ser atualizado à mão com a URL real.
+**Já está no ar** em `wss://erros-share-relay.onrender.com` — esse é o valor
+de `DEFAULT_RELAY_URL` em `src/main/net/relay-config.ts` (repo raiz), então o
+app já usa esse relé por padrão sem precisar de nenhuma env var.
+
+Pra rodar o seu próprio (em vez do público, ou além dele): veja
+[`render.yaml`](render.yaml). Resumo: fork do repo → Render → New → Blueprint
+→ escolha o repo (Root Directory = `server`) → Deploy. Copie a URL
+(`https://<host>`) e aponte o app pra `wss://<host>` via a variável de
+ambiente `ERROS_RELAY_URL` (sobrepõe o padrão embutido).
 
 Porta: lida de `process.env.PORT` (o Render injeta automaticamente); default
 `8787` fora dele.

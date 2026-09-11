@@ -81,7 +81,7 @@ só para rodar o renderer sozinho no browser (`vite src/renderer`, com `?mock` �
 7. **O peer deriva `w` de forma lazy** (correção da v0.3): `RoomSession.join` passa `{password, codeSalt}` para o `SignalingClient`, que deriva `w` só depois do `hello_ack` do host, com o `argonParams` real do host — não mais um `argonParams` default assumido de antemão.
 8. **`server/`: `typescript`/`@types/*` em `dependencies`, não `devDependencies`.** Descoberto no primeiro deploy real: Render (e qualquer PaaS com `buildCommand`+`startCommand` no mesmo container, sem estágio de build separado) roda `npm ci` com `NODE_ENV=production` já no ambiente — a partir do npm 9 isso faz `devDependencies` serem puladas silenciosamente, e o `tsc` do `buildCommand` quebra com `TS2688` por faltar `@types/node`. `server/README.md` documenta o porquê pra ninguém "corrigir" isso de volta.
 
-**Decisões pendentes de confirmação:** ver §16 (perguntas em aberto) — codec (VP9 vs H.264), E2EE de mídia (confirmado: **fora da v1**), e a interop werift↔Chromium (só validável com renderer real). Além disso, ver §18.6: a URL real do relé de produção (hoje um placeholder em `relay-config.ts`) precisa ser preenchida quando o usuário fizer o deploy no Render.
+**Decisões pendentes de confirmação:** ver §16 (perguntas em aberto) — codec (VP9 vs H.264), E2EE de mídia (confirmado: **fora da v1**), e a interop werift↔Chromium (só validável com renderer real). O relé de produção já está no ar (§18.6) — falta só o teste de campo real entre máquinas de casas diferentes.
 
 ### Como retomar
 
@@ -1020,12 +1020,14 @@ para dormir de novo - comportamento desejado, não um bug.
 testes) → `process.env.ERROS_RELAY_URL` (dev, ou um usuário avançado
 sobrepondo) → `process.env.ERROS_RELAY_URL_BAKED` (valor gravado no build de
 produção - ainda não automatizado; hoje é so mais uma env var) → `DEFAULT_RELAY_URL`
-(constante no código). **`DEFAULT_RELAY_URL` hoje é um placeholder**
-(`wss://erros-share-relay.onrender.com`) - precisa ser substituído pela URL
-real depois que o usuário fizer o deploy (`server/README.md`), ou o build de
-produção precisa injetar `ERROS_RELAY_URL_BAKED` nesse momento. `src/main/config/`
-(settings.json, mencionado no §3 como pendente desde a Fase 3) é onde isso
-deveria virar uma preferência editável pelo usuário, em vez de env var.
+(constante no código). **`DEFAULT_RELAY_URL` já é a URL real do relé em
+produção** (`wss://erros-share-relay.onrender.com`, verificado ao vivo -
+`GET /healthz` responde e um `RelayHostLink`+`RelayPeerLink` completos trocam
+dados através dele) — deployado no Render seguindo `server/README.md`.
+`src/main/config/` (settings.json, mencionado no §3 como pendente desde a
+Fase 3) é onde isso deveria virar uma preferência editável pelo usuário, em
+vez de env var/constante fixa - útil sobretudo pra quem quiser apontar para
+um relé próprio.
 
 **Código de sala v2.** Já coberto no §5: só `roomId`+`codeSalt`, porque o
 endereço agora é sempre o mesmo `relayUrl` para todo mundo.
@@ -1061,11 +1063,12 @@ lista.
 
 ### 18.6 Pendências conhecidas deste pivô
 
-- **URL do relé de produção**: hoje é um placeholder
-  (`DEFAULT_RELAY_URL` em `relay-config.ts`, §18.4). Isto é a única peça que
-  só o deploy real resolve - depende da conta do usuário no Render (ou onde
-  ele decidir hospedar). Depois do deploy, trocar essa constante (ou setar
-  `ERROS_RELAY_URL`) é o passo final.
+- ✅ **URL do relé de produção**: deployado no Render em
+  `wss://erros-share-relay.onrender.com` — já é o valor de `DEFAULT_RELAY_URL`
+  (§18.4), verificado ao vivo (host+peer completos trocando dados através
+  dele). No caminho até aqui, o primeiro deploy falhou por causa da decisão 8
+  em §0 (`typescript`/`@types/*` em `devDependencies` some com
+  `NODE_ENV=production`) - corrigido movendo-os para `dependencies`.
 - ✅ **`iceServers` da mídia**: `RoomSession.#startServer` agora passa
   `defaultIceServers()` (`src/main/net/stun.ts`, os mesmos STUN públicos do
   `DEFAULT_STUN_SERVERS`) para o `SfuMediaPlane`/`SfuRouter` do host. Isso é o

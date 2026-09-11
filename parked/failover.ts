@@ -21,9 +21,9 @@ import {
   type ElectionEntry,
   electionEntriesFromRoster,
   successionOrder,
-} from './succession.js';
-import type { HeirStatus } from '../net/heir-probe.js';
-import type { InboundEndpoint, RosterEntry } from '../../shared/protocol.js';
+} from '../src/main/election/succession.js';
+import type { HeirStatus } from './heir-probe.js';
+import type { InboundEndpoint, RosterEntry } from '../src/shared/protocol.js';
 
 export type FailoverAction =
   | { readonly type: 'promote'; readonly epoch: number }

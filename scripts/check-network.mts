@@ -1,42 +1,32 @@
 // @ts-nocheck  -- operator tool, run via tsx
 /**
- * Manual network check (Fase 1). Roda na SUA máquina, na SUA rede, e diz se
- * você conseguiria ser host de uma sala:
+ * Manual network check. Roda na SUA máquina, na SUA rede, e diz se a mídia
+ * (WebRTC/ICE) vai conseguir sair - a sinalização não precisa mais disso, ela
+ * passa pelo relé hospedado (docs/DESIGN.md secção 2.2/18):
  *
- *   npx tsx scripts/check-network.mts [--port=47821]
+ *   npx tsx scripts/check-network.mts
  *
- * Faz de verdade: descobre o IP externo por STUN, tenta abrir a porta por
- * PCP/NAT-PMP/UPnP, monta um código de sala de exemplo, e libera a porta ao
- * sair. Nenhum dado sai da sua máquina além do pacote STUN.
+ * Faz de verdade: descobre o IP externo por STUN e diz se há CGNAT no caminho.
+ * Nenhum dado sai da sua máquina além do pacote STUN.
  */
 
-import { discoverHostEndpoint } from '../src/main/room/host-endpoint.js';
+import { DEFAULT_STUN_SERVERS, discoverExternalAddress, isCarrierGradeNat } from '../src/main/net/stun.js';
 import { primaryLanIpv4, allLanIpv4 } from '../src/main/net/local-ip.js';
-
-const port = Number(
-  process.argv.find((a) => a.startsWith('--port='))?.split('=')[1] ?? 47821,
-);
 
 console.log(`IP(s) local: ${allLanIpv4().join(', ') || '(nenhum)'}`);
 console.log(`LAN primária: ${primaryLanIpv4() ?? '(nenhuma)'}`);
-console.log(`testando porta TCP ${port}...\n`);
+console.log(`consultando STUN (${DEFAULT_STUN_SERVERS.map((s) => s.host).join(', ')})...\n`);
 
-const info = await discoverHostEndpoint({ port });
+const external = await discoverExternalAddress(DEFAULT_STUN_SERVERS, { localPort: 0 });
 
-console.log(`método de mapeamento : ${info.mappingMethod}`);
-console.log(`endereço externo     : ${info.endpoint.address}:${info.endpoint.port}`);
-console.log(`atrás de NAT          : ${info.directlyReachable ? 'não' : 'sim'}`);
+console.log(`endereço externo : ${external.address} (${external.family})`);
 
-if (info.blocker === 'carrier_grade_nat') {
-  console.log('\n❌ CGNAT detectado — seu provedor não deixa você aceitar conexões.');
-  console.log('   Você pode ENTRAR em salas, mas não pode ser host.');
-} else if (info.blocker === 'no_inbound_path') {
-  console.log('\n⚠  Não foi possível abrir a porta automaticamente.');
-  console.log(`   Configure port forwarding: TCP ${port} -> ${primaryLanIpv4()}:${port}`);
+if (external.family === 'ipv4' && isCarrierGradeNat(external.address)) {
+  console.log('\n❌ CGNAT detectado — o hole punching de mídia tende a falhar sem TURN.');
 } else {
-  console.log('\n✅ Você consegue ser host.');
-  console.log(`\ncódigo de sala de exemplo:\n   ${info.code}`);
+  console.log('\n✅ Endereço externo normal — o hole punching de mídia (ICE) deve funcionar.');
 }
-
-await info.close();
+console.log(
+  '\n(a sinalização hoje passa pelo relé hospedado: nenhuma porta de entrada é necessária para isso.)',
+);
 process.exit(0);

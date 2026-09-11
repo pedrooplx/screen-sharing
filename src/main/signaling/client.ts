@@ -5,9 +5,8 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { WebSocket } from 'ws';
 import { Connection } from '../net/connection.js';
-import { WsTransport } from '../net/transport.js';
+import type { Transport } from '../net/transport.js';
 import { type ArgonParams, derivePasswordKey, deriveArgonSalt } from '../crypto/kdf.js';
 import { HandshakeError, runPeerHandshake } from './handshake.js';
 import { Heartbeat } from './heartbeat.js';
@@ -21,7 +20,6 @@ import {
   ProtocolError,
 } from '../../shared/protocol.js';
 
-const CONNECT_TIMEOUT_MS = 8_000;
 const JOINED_TIMEOUT_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 2_000;
 const HEARTBEAT_MAX_MISSED = 3;
@@ -31,11 +29,11 @@ export type PasswordSource =
   | { readonly password: string; readonly codeSalt: Uint8Array };
 
 export interface SignalingClientOptions {
-  readonly host: string;
-  readonly port: number;
   readonly roomId: Uint8Array;
   readonly secret: PasswordSource;
   readonly nickname: string;
+  /** an already-open transport to the host (the relay link, or a local ws) */
+  readonly transport: Transport;
   readonly canHost?: boolean;
   readonly inboundPort?: number;
   readonly heartbeatIntervalMs?: number;
@@ -94,26 +92,7 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
   }
 
   async connect(): Promise<JoinResult> {
-    const url = `ws://${this.#opts.host}:${this.#opts.port}`;
-    const ws = new WebSocket(url);
-    // permanent handler so a late socket error is never an unhandled 'error'
-    ws.on('error', () => {});
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        ws.terminate();
-        reject(new ProtocolError('connection timed out'));
-      }, CONNECT_TIMEOUT_MS);
-      ws.once('open', () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      ws.once('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
-
-    const conn = new Connection(new WsTransport(ws), 'peer');
+    const conn = new Connection(this.#opts.transport, 'peer');
     this.#conn = conn;
 
     await runPeerHandshake(conn, {

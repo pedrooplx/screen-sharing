@@ -15,12 +15,9 @@ let state: SessionSnapshot = {
   nickname: '',
   epoch: 0,
   code: null,
-  codeStatus: null,
   roster: [],
   streams: [],
   maxRecommendedSubscriptions: 2,
-  canRetryMapping: false,
-  retryingMapping: false,
   notice: null,
 };
 
@@ -32,25 +29,15 @@ function set(next: Partial<SessionSnapshot>): void {
 export function installMock(): void {
   const api: ErrosApi = {
     async hostRoom({ nickname }) {
-      set({ phase: 'discovering', nickname });
+      set({ phase: 'connecting', nickname });
       await new Promise((r) => setTimeout(r, 700));
       set({
         phase: 'hosting',
         isHost: true,
         selfPeerId: 'p_host',
         epoch: 0,
-        code: 'K7QM-4X2A-9BTR-0FDW-6HJE-3NCV-8PGY-1SZK',
-        codeStatus: {
-          mappingMethod: 'manual',
-          externalAddress: '203.0.113.9',
-          directlyReachable: false,
-          blocker: 'no_inbound_path',
-          manualForwardPort: 47821,
-          manualForwardTo: '192.168.0.42',
-        },
-        canRetryMapping: true,
-        notice:
-          'Não foi possível abrir a porta automaticamente. Ative UPnP no seu roteador e tente de novo, ou encaminhe TCP 47821 para 192.168.0.42:47821.',
+        code: 'K7QM4X2-A9BTR0F-DW6HJE3',
+        notice: null,
         roster: [
           rosterEntry('p_host', nickname, 0, true, true),
           rosterEntry('p_a', 'ana', 1, false, true),
@@ -69,6 +56,7 @@ export function installMock(): void {
         phase: 'in-room',
         selfPeerId: 'p_me',
         epoch: 0,
+        notice: null,
         roster: [
           rosterEntry('p_host', 'pedro', 0, true, true),
           rosterEntry('p_me', nickname, 3, false, true),
@@ -81,22 +69,8 @@ export function installMock(): void {
         phase: 'idle',
         isHost: false,
         code: null,
-        codeStatus: null,
         roster: [],
         notice: null,
-      });
-      return { ok: true, value: state };
-    },
-    async retryMapping() {
-      set({ retryingMapping: true });
-      await new Promise((r) => setTimeout(r, 900));
-      set({
-        retryingMapping: false,
-        canRetryMapping: false,
-        notice: 'Porta aberta via upnp. Pronto para hospedar.',
-        codeStatus: state.codeStatus
-          ? { ...state.codeStatus, blocker: null, mappingMethod: 'upnp' }
-          : null,
       });
       return { ok: true, value: state };
     },

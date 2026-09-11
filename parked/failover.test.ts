@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Failover, type FailoverAction } from '../../src/main/election/failover.js';
-import type { RosterEntry } from '../../src/shared/protocol.js';
-import type { HeirStatus } from '../../src/main/net/heir-probe.js';
+import { Failover, type FailoverAction } from './failover.js';
+import type { RosterEntry } from '../src/shared/protocol.js';
+import type { HeirStatus } from './heir-probe.js';
 
 function entry(p: Partial<RosterEntry> & { peerId: string }): RosterEntry {
   return {

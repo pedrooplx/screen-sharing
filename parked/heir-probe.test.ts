@@ -4,7 +4,7 @@ import {
   HeirProbeError,
   HeirProbeResponder,
   heirProbe,
-} from '../../src/main/net/heir-probe.js';
+} from './heir-probe.js';
 
 const roomId = new Uint8Array([1, 2, 3, 4]);
 const W = new Uint8Array(randomBytes(32));

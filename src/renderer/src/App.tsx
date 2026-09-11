@@ -12,12 +12,9 @@ const IDLE: SessionSnapshot = {
   nickname: '',
   epoch: 0,
   code: null,
-  codeStatus: null,
   roster: [],
   streams: [],
   maxRecommendedSubscriptions: 2,
-  canRetryMapping: false,
-  retryingMapping: false,
   notice: null,
 };
 
@@ -44,11 +41,7 @@ export function App() {
     );
   }
 
-  const inRoom =
-    snap.phase === 'in-room' ||
-    snap.phase === 'hosting' ||
-    snap.phase === 'reconnecting' ||
-    snap.phase === 'promoting';
+  const inRoom = snap.phase === 'in-room' || snap.phase === 'hosting';
 
   return (
     <div className="app">
@@ -72,7 +65,8 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
   const [busy, setBusy] = useState<null | 'host' | 'join'>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const working = busy !== null || phase === 'discovering' || phase === 'connecting';
+  const working =
+    busy !== null || phase === 'connecting' || phase === 'waking';
 
   const host = async () => {
     setError(null);
@@ -123,10 +117,10 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
           disabled={working || !nickname.trim() || !password}
           onClick={host}
         >
-          {busy === 'host' || phase === 'discovering' ? (
+          {busy === 'host' || phase === 'connecting' || phase === 'waking' ? (
             <>
               <span className="spinner" />
-              Descobrindo rede…
+              {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
             </>
           ) : (
             'Criar sala'
@@ -141,7 +135,7 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
           <input
             id="code"
             value={code}
-            placeholder="K7QM-4X2A-9BTR-…"
+            placeholder="K7QM4X2-A9BTR0F-DW6HJE3"
             onChange={(e) => setCode(e.target.value)}
           />
         </div>
@@ -159,10 +153,10 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
           disabled={working || !nickname.trim() || !password || !code.trim()}
           onClick={join}
         >
-          {busy === 'join' || phase === 'connecting' ? (
+          {busy === 'join' || phase === 'connecting' || phase === 'waking' ? (
             <>
               <span className="spinner" />
-              Conectando…
+              {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
             </>
           ) : (
             'Entrar'
@@ -209,35 +203,6 @@ function Room({ snap }: { snap: SessionSnapshot }) {
             <span>{snap.code}</span>
             <button onClick={copy}>{copied ? 'Copiado' : 'Copiar'}</button>
           </div>
-          {snap.codeStatus?.blocker === 'no_inbound_path' && (
-            <div className="port-help">
-              <p className="muted" style={{ margin: '0 0 10px' }}>
-                A porta não abriu sozinha. Só quem está na sua rede consegue
-                entrar até você <b>ativar o UPnP no roteador e tentar de novo</b>,
-                ou encaminhar{' '}
-                <b>
-                  TCP {snap.codeStatus.manualForwardPort} →{' '}
-                  {snap.codeStatus.manualForwardTo}:
-                  {snap.codeStatus.manualForwardPort}
-                </b>
-                .
-              </p>
-              <button
-                className="primary"
-                disabled={!snap.canRetryMapping || snap.retryingMapping}
-                onClick={() => void window.erros.retryMapping()}
-              >
-                {snap.retryingMapping ? (
-                  <>
-                    <span className="spinner" />
-                    Tentando abrir a porta…
-                  </>
-                ) : (
-                  'Tentar abrir a porta de novo'
-                )}
-              </button>
-            </div>
-          )}
         </div>
       )}
 
@@ -308,24 +273,6 @@ function StatusPills({ snap }: { snap: SessionSnapshot }) {
   return (
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
       <span className="pill">epoch {snap.epoch}</span>
-      {snap.codeStatus && (
-        <span
-          className={`pill ${snap.codeStatus.blocker ? 'warn' : 'ok'}`}
-          title={snap.codeStatus.externalAddress}
-        >
-          {snap.codeStatus.blocker === 'carrier_grade_nat'
-            ? 'CGNAT — não pode hospedar'
-            : snap.codeStatus.blocker === 'no_inbound_path'
-              ? 'porta manual necessária'
-              : `porta aberta via ${snap.codeStatus.mappingMethod}`}
-        </span>
-      )}
-      {snap.phase === 'reconnecting' && (
-        <span className="pill warn">
-          <span className="spinner" />
-          reconectando
-        </span>
-      )}
     </div>
   );
 }

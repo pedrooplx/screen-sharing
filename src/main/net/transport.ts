@@ -16,6 +16,18 @@ export interface Transport {
   onError(cb: (err: Error) => void): void;
 }
 
+/**
+ * Something a SignalingServer consumes to get its inbound Connections. Either a
+ * local WebSocketServer (WsConnectionSource) or the shared relay link
+ * (RelayHostLink), which yields one Transport per remote peer.
+ */
+export interface ConnectionSource {
+  onConnection(cb: (transport: Transport, ip: string) => void): void;
+  /** the whole source went down (relay link dropped, wss closed) */
+  onClosed(cb: (reason: string) => void): void;
+  close(): Promise<void>;
+}
+
 /** A Transport backed 1:1 by a real ws WebSocket. */
 export class WsTransport implements Transport {
   #closed = false;

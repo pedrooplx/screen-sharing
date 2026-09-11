@@ -14,7 +14,7 @@
 
 import { gateway4async } from 'default-gateway';
 import { pmpNat, upnpNat, type Gateway } from '@achingbrain/nat-port-mapper';
-import { primaryLanIpv4 } from './local-ip.js';
+import { primaryLanIpv4 } from '../src/main/net/local-ip.js';
 
 export type MappingMethod = 'nat-pmp' | 'upnp' | 'manual';
 

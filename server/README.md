@@ -19,7 +19,6 @@ Nada mais. A mídia (WebRTC) **não passa por aqui** — é P2P direto entre os 
 cd server
 npm install
 npm run build && npm start        # :8787
-# ou: npm run dev  (watch, sem build)
 ```
 
 `GET /healthz` → `{"ok":true,"rooms":N}`.
@@ -27,8 +26,14 @@ npm run build && npm start        # :8787
 ## Deploy no Render (grátis)
 
 Veja [`render.yaml`](render.yaml). Resumo: fork do repo → Render → New → Blueprint
-→ escolha o repo (Root Directory = `server`) → Deploy. Copie a URL e aponte o app
-para `wss://<host>`.
+→ escolha o repo (Root Directory = `server`) → Deploy. Copie a URL (`https://<host>`)
+e aponte o app para `wss://<host>` via a variável de ambiente `ERROS_RELAY_URL`
+(veja `src/main/net/relay-config.ts` no repo raiz) — hoje isso ainda não é
+automático no build de produção; até lá, `DEFAULT_RELAY_URL` naquele arquivo é
+só um placeholder e precisa ser atualizado à mão com a URL real.
+
+Porta: lida de `process.env.PORT` (o Render injeta automaticamente); default
+`8787` fora dele.
 
 **Free tier:** dorme após 15 min ocioso, ~40 s para acordar. O app trata isso:
 retenta a primeira conexão e faz ping enquanto há sala ativa.

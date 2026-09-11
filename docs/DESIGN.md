@@ -1,57 +1,96 @@
 # Design Doc — `erros-share`
-### Compartilhamento de tela P2P multi-transmissor, sem infraestrutura própria
+### Compartilhamento de tela P2P multi-transmissor
 
 | | |
 |---|---|
-| **Versão** | 0.3 — Fases 0, 1 e 2 concluídas |
+| **Versão** | 0.4 — Fases 0-3 (mídia) concluídas; sinalização migrada para o relé hospedado |
 | **Alvo** | Windows 11 x64 |
-| **Stack** | Electron + WebRTC (Chromium) + WebRTC nativo em Node (werift) |
+| **Stack** | Electron + WebRTC (Chromium) + WebRTC nativo em Node (werift) + relé Node hospedado (`server/`) |
 | **Escala** | até 12 participantes por sala |
-| **Status** | plano de controle + failover funcionando e testados; **próximo: Fase 3 (mídia)** |
+| **Status** | plano de controle sobre o relé + mídia P2P funcionando e testados; failover automático **parcado** (ver §18) |
 
 > Documentação e UI em pt-BR. Código, identificadores, campos de protocolo e comentários em inglês.
+>
+> **v0.4 é um desvio da restrição fundadora original ("nenhuma infraestrutura
+> mantida pelo usuário").** Por decisão explícita do usuário (não é mais o
+> plano "totalmente serverless" das versões 0.1-0.3): a **sinalização** agora
+> passa por um relé hospedado gratuito (Render), porque exigir que o host abra
+> uma porta no roteador era o maior ponto de atrito do produto. A **mídia**
+> continua P2P via ICE/STUN, sem relé. Ver §18 para a arquitetura completa e o
+> porquê.
 
 ---
 
 ## 0. Estado da implementação (leia primeiro numa nova sessão)
 
-**Fases 0, 1, 2 concluídas. Fase 3 em andamento — checkpoints 3.1 (shell), 3.2 (captura), 3.3 (SFU), 3.4 (encaminhamento seletivo), 3.5 (governor) e 3.6 (mídia sobrevive ao failover) prontos. Falta só o 3.7 (teste de campo).**
+**Fases 0-3 concluídas na arquitetura original (serverless); depois disso, a
+sinalização foi migrada para um relé hospedado (v0.4, §18) por pedido
+explícito do usuário — o atrito de "abrir porta no roteador" era grande demais.
+Consequência: o failover automático de host (Fase 2) foi PARCADO (código
+mantido em `parked/`, fora do build) porque o modelo de relé v1 não tem
+reconexão do host; ver §18.5.**
 
-**O que já existe e passa nos testes** (`npm test` → 135 testes, 20 arquivos; `npm run typecheck` limpo — Node + web; `npm audit` → 0 vulnerabilidades):
+**O que já existe e passa nos testes** (`npm test` → 167 testes, 21 arquivos;
+`npm run typecheck` limpo — Node + web + `server/`; `npm audit` → 0
+vulnerabilidades em ambos os `package.json`):
 
 | Área | Módulos | Status |
 |---|---|---|
-| Cripto | `src/main/crypto/{lv,kdf,cpace,aead}.ts` | CPace ristretto255/SHA-512 **verificado contra o vetor de teste do CFRG**; Argon2id 64 MiB; AES-256-GCM |
+| Cripto | `src/main/crypto/{lv,kdf,cpace,aead}.ts` | CPace ristretto255/SHA-512 **verificado contra o vetor de teste do CFRG**; Argon2id 64 MiB; AES-256-GCM. Roda ponta a ponta através do relé sem mudança nenhuma. |
 | Frames | `src/main/net/{connection,frame-codec}.ts` | enquadramento autenticado, contador anti-replay, fila para corrida texto→binário |
-| Código de sala | `src/main/room/{base32,ip,room-code,host-endpoint}.ts` | Base32 Crockford + CRC-16, IPv4/IPv6, orquestrador STUN+NAT→código |
-| NAT | `src/main/net/{stun,nat-mapping,local-ip,reachability}.ts` | STUN **implementado à mão** (validado contra o Google); UPnP/PMP/PCP via `@achingbrain/nat-port-mapper`; CGNAT detectado |
-| Sinalização | `src/main/signaling/{server,client,handshake,roster,rate-limit,heartbeat}.ts` | `SignalingServer` (host) + `SignalingClient` (peer); admissão por senha; rate limit por IP; heartbeat ping/pong |
-| Failover | `src/main/election/{succession,failover}.ts`, `src/main/net/heir-probe.ts`, `src/main/signaling/peer-node.ts` | ordem de sucessão determinística; `heir_probe` UDP autenticado por `w`; `Failover` (promote / re-home / reconnect / room-dead); `PeerNode` (participante completo); `host_transfer` gracioso |
+| Transporte | `src/main/net/{transport,ws-source,relay-link,relay-wire}.ts` | `Connection` roda sobre um `Transport` abstrato (§18.2): `WsTransport`+`WsConnectionSource` (WS local, só testes) ou `RelayHostLink`/`RelayPeerLink` (produção, via `server/`) |
+| Código de sala | `src/main/room/{base32,ip,room-code}.ts` | Base32 Crockford + CRC-16; **v2** carrega só `roomId`+`codeSalt` (§5, §18.4) — nenhum IP/porta |
+| Relé (hospedado) | `server/src/{index,relay,wire}.ts` | multiplexador WS que só encaminha bytes opacos; deploy Render (`server/render.yaml`); ver §18 |
+| Sinalização | `src/main/signaling/{server,client,handshake,roster,rate-limit,heartbeat}.ts` | `SignalingServer` (host) + `SignalingClient` (peer), agora sobre um `Transport`/`ConnectionSource` injetado em vez de abrir o próprio socket; admissão por senha; rate limit por IP; heartbeat ping/pong |
 | Protocolo | `src/shared/protocol.ts` | todas as mensagens em `zod`; `epoch` no envelope e no `joined` |
-| **App shell (3.1)** | `src/main/index.ts`, `src/main/app/{room-session,ipc}.ts`, `src/preload/index.ts`, `src/renderer/` | Electron + React (pt-BR); `RoomSession` (criar/entrar, une host↔peer); IPC tipado por `window.erros`; lobby + tela de sala com roster ao vivo, código, status de rede. `npm run dev` sobe tudo |
-| **Captura local (3.2)** | `src/main/app/capture.ts`, `src/renderer/src/{capture.ts,CapturePanel.tsx}` | listar telas/janelas com thumbnail, `setDisplayMediaRequestHandler` com áudio de sistema (`audio: 'loopback'`), prévia local em `<video>` |
-| **SFU + mídia (3.3–3.5)** | `src/main/sfu/{router,codecs,media-plane,governor}.ts`, `src/renderer/src/{rtc.ts,StreamsPanel.tsx}` | mini-SFU werift no `main`: 1 PC por publisher, 1 por (assinante×stream); encaminha RTP sem transcodificar; PLI ao primeiro pacote. Negociação **non-trickle**. Encaminhamento seletivo (`demand-changed` → pausa/retoma o encoder do dono). **Governor**: escada de 4 níveis, `stats_report` (perda/CPU) a cada 4 s, `quality_directive` com `scaleDownBy`. Renderer `useMedia()`: publica, assina múltiplos streams, aplica directive no `RTCRtpSender`, manda stats, expõe `publishIdle`/`watching`. **werift↔werift testado** (`test/sfu/{router,media-plane,governor}.test.ts`); **werift↔Chromium só valida com o app real** (docs/TESTING-MEDIA.md) |
+| **App shell** | `src/main/index.ts`, `src/main/app/{room-session,ipc}.ts`, `src/preload/index.ts`, `src/renderer/` | Electron + React (pt-BR); `RoomSession` (host abre `RelayHostLink`+`SignalingServer`, peer abre `RelayPeerLink`+`SignalingClient` direto, sem `PeerNode`); IPC tipado por `window.erros`; lobby + tela de sala com roster ao vivo e código. `npm run dev` sobe tudo |
+| **Captura local** | `src/main/app/capture.ts`, `src/renderer/src/{capture.ts,CapturePanel.tsx}` | listar telas/janelas com thumbnail, `setDisplayMediaRequestHandler` com áudio de sistema (`audio: 'loopback'`), prévia local em `<video>` |
+| **SFU + mídia** | `src/main/sfu/{router,codecs,media-plane,governor}.ts`, `src/renderer/src/{rtc.ts,StreamsPanel.tsx}` | mini-SFU werift no `main`: 1 PC por publisher, 1 por (assinante×stream); encaminha RTP sem transcodificar; PLI ao primeiro pacote. Negociação **non-trickle**. Encaminhamento seletivo (`demand-changed` → pausa/retoma o encoder do dono). **Governor**: escada de 4 níveis, `stats_report` (perda/CPU) a cada 4 s, `quality_directive` com `scaleDownBy`. **werift↔werift testado** (`test/sfu/{router,media-plane,governor}.test.ts`); **werift↔Chromium só valida com o app real** (docs/TESTING-MEDIA.md) |
 | Spike | `scripts/spike-sfu-throughput.mts`, `docs/SPIKE-SFU.md` | werift sustenta ~6.200 pkt/s a ~64% de um núcleo (pior caso) |
-| Ferramenta | `scripts/check-network.mts` (`npm run check:network`) | roda STUN+NAT+geração de código na rede real |
+| Ferramenta | `scripts/check-network.mts` (`npm run check:network`) | roda STUN+CGNAT na rede real (só relevante pra mídia agora — a sinalização não precisa mais disso) |
+| **Parcado** (`parked/`, fora do build) | `peer-node.ts`, `failover.ts`, `heir-probe.ts`, `host-endpoint.ts`, `nat-mapping.ts` + testes | failover automático de host (Fase 2) e a descoberta STUN/UPnP do plano de controle. Ver §18.5 e `parked/README.md`. |
 
-**O que NÃO existe ainda (o resto da Fase 3):** ICE trickle (hoje non-trickle); teste de campo real werift↔Chromium entre máquinas (3.7). `src/main/config/` (settings.json) ainda não existe.
+**O que NÃO existe ainda:** ICE trickle (hoje non-trickle); teste de campo real
+werift↔Chromium entre máquinas; failover de host sobre o relé (§18.5, ideia
+registrada, não implementada); `src/main/config/` (settings.json) ainda não
+existe — `ERROS_RELAY_URL` hoje só vem de env var ou do valor padrão embutido
+(§18.4).
 
-**Toolchain (Fase 3.1):** `electron@44` + `electron-vite@5` (com `vite@7` — fixado porque `electron-vite` ainda não aceita vite 8) + `@vitejs/plugin-react@5` + `react@19`. `werift` agora está em `dependencies`. Dois tsconfig: `tsconfig.json` (Node: main/preload/shared/test) e `tsconfig.web.json` (renderer: DOM + jsx). O preload é forçado a `.cjs` (`electron.vite.config.ts`) porque preload em sandbox precisa ser CommonJS. `src/renderer/vite.config.ts` existe só para rodar o renderer sozinho no browser (`vite src/renderer`, com `?mock` → `src/renderer/src/mock.ts` stub-a o `window.erros`).
+**Toolchain:** `electron@44` + `electron-vite@5` (com `vite@7` — fixado porque
+`electron-vite` ainda não aceita vite 8) + `@vitejs/plugin-react@5` +
+`react@19`. `werift` está em `dependencies`. Dois tsconfig na raiz:
+`tsconfig.json` (Node: main/preload/shared/test) e `tsconfig.web.json`
+(renderer: DOM + jsx) — **`parked/` fica fora de ambos** (não compila, não
+roda). `server/` é um pacote **separado**, com seu próprio
+`package.json`/`tsconfig.json`/`node_modules` (deploy independente; ver seu
+README). O preload é forçado a `.cjs` (`electron.vite.config.ts`) porque
+preload em sandbox precisa ser CommonJS. `src/renderer/vite.config.ts` existe
+só para rodar o renderer sozinho no browser (`vite src/renderer`, com `?mock` →
+`src/renderer/src/mock.ts` stub-a o `window.erros`).
 
 **Desvios do design já decididos e implementados** (todos com o OK do usuário):
-1. **Plano de controle sobre WebSocket**, não sobre data channel SCTP (§2.2). O heartbeat roda sobre o WebSocket com o host.
-2. **`heir_probe` é UDP autenticado por `w`**, não um WebSocket ocioso permanente com o herdeiro (§9.1). Request/reply com HMAC nas duas pontas.
-3. **STUN hand-rolled** (`src/main/net/stun.ts`) em vez de um pacote npm (árvore de dependências podre).
-4. **`@achingbrain/nat-port-mapper`** em vez de `nat-api` (que puxava `request` descontinuado).
-5. **Na promoção, o novo host NÃO roda um cliente próprio** — lê o roster direto do `SignalingServer` (igual ao host da Fase 1). O design menciona "host roda um cliente como qualquer outro"; não foi necessário.
-6. **`inboundVerified` é só um TCP connect de volta**, sem o "handshake curto" de prova de identidade ainda. Ver §14, limitação.
-7. **O peer deriva `w` de forma eager** em `RoomSession.join` (antes de conectar), usando `argonParams` default. Se um host usar `argonParams` não-default, o peer precisa saber (hoje: só via opção). O caminho correto (derivar após `hello_ack`) existe no `SignalingClient` (`PasswordSource` aceita `{password, codeSalt}`) mas `PeerNode` ainda só aceita `{w}`. TODO da Fase 3/4.
+1. **Sinalização hospedada num relé** (v0.4, §18) em vez de o host abrir uma
+   porta — desvio da restrição fundadora original. A mídia continua P2P.
+2. **Failover automático de host — parcado** (§18.5, `parked/`) até o relé v2
+   suportar reconexão do host. Ver decisão 6 abaixo, que ainda vale para
+   quando isso voltar.
+3. **Plano de controle sobre WebSocket**, não sobre data channel SCTP (§2.3). O heartbeat roda sobre o WebSocket com o host (hoje: através do relé).
+4. **STUN hand-rolled** (`src/main/net/stun.ts`) em vez de um pacote npm (árvore de dependências podre). Usado só pela mídia agora.
+5. **`inboundVerified` é só um TCP connect de volta**, e hoje é **inerte com o relé** (o host só vê `ip:'relay'` de cada peer — não há mais um IP real para provar). Ver §14, limitação, e §18.5.
+6. *(histórica, parcada junto com o failover)* **`heir_probe` era UDP autenticado por `w`**, não um WebSocket ocioso permanente com o herdeiro (§9.1). **`@achingbrain/nat-port-mapper`** em vez de `nat-api`. Na promoção, o novo host não rodava um cliente próprio.
+7. **O peer deriva `w` de forma lazy** (correção da v0.3): `RoomSession.join` passa `{password, codeSalt}` para o `SignalingClient`, que deriva `w` só depois do `hello_ack` do host, com o `argonParams` real do host — não mais um `argonParams` default assumido de antemão.
 
-**Decisões pendentes de confirmação:** ver §16 (perguntas em aberto) — codec (VP9 vs H.264), E2EE de mídia (confirmado: **fora da v1**), e a interop werift↔Chromium (só validável com renderer real, no próximo checkpoint).
+**Decisões pendentes de confirmação:** ver §16 (perguntas em aberto) — codec (VP9 vs H.264), E2EE de mídia (confirmado: **fora da v1**), e a interop werift↔Chromium (só validável com renderer real). Além disso, ver §18.6: a URL real do relé de produção (hoje um placeholder em `relay-config.ts`) precisa ser preenchida quando o usuário fizer o deploy no Render.
 
-### Como retomar na Fase 3
+### Como retomar
 
-O ponto de entrada é o **§17 (Kickoff da Fase 3)** no fim deste documento. Em resumo: adicionar Electron + `electron-vite`, criar o `renderer`, embutir o mini-SFU werift no `SignalingServer` (ou num módulo `src/main/sfu/`), e ligar `RTCPeerConnection` no renderer ↔ SFU no `main`. O plano de controle (mensagens `publish_*` / `subscribe_*` / `quality_directive` / `stats_report`) já está esboçado no §7.3 mas **ainda não implementado** nos schemas `zod` nem no servidor.
+Se o pivô do relé (§18) já está OK e funcionando: o próximo trabalho é
+**mídia** — SFU-peer conectando outbound-only + `iceServers` STUN por padrão
+(§18 menciona isso como pendente), e o teste de campo real (§17.3 item 7). Se
+em vez disso você está estendendo o relé (failover v2, TURN, etc.), comece por
+§18.5 e `parked/README.md`. O ponto de entrada histórico da Fase 3 (mídia,
+antes do pivô do relé) é o **§17** no fim deste documento — ainda válido para
+tudo que não é sinalização.
 
 ---
 
@@ -59,9 +98,20 @@ O ponto de entrada é o **§17 (Kickoff da Fase 3)** no fim deste documento. Em 
 
 Aplicação desktop onde várias pessoas em **casas e redes diferentes, pela internet, sem VPN** entram numa mesma sala, transmitem a tela simultaneamente e escolhem individualmente quais transmissões assistir.
 
-**Restrição fundadora:** nenhuma infraestrutura mantida pelo usuário. Não existe backend. O executável é idêntico em todos os PCs; quem cria a sala vira o coordenador (`host`) daquela sessão. STUN público é permitido (um pacote UDP, sem mídia). TURN é apenas ponto de extensão opcional.
+**Restrição fundadora original:** nenhuma infraestrutura mantida pelo usuário. O
+executável é idêntico em todos os PCs; quem cria a sala vira o coordenador
+(`host`) daquela sessão para a **mídia**. STUN público é permitido (um pacote
+UDP, sem mídia). TURN é apenas ponto de extensão opcional.
 
-**No escopo:** captura de tela inteira ou janela + áudio do sistema; múltiplos transmissores; assinatura seletiva de fluxos; failover automático de host; autenticação por código + senha.
+> **Desvio explícito (v0.4, §18):** a restrição acima foi relaxada para a
+> **sinalização apenas**. Um relé hospedado (mantido pelo autor do app, não
+> pelo usuário que cria a sala) multiplexa o plano de controle, porque exigir
+> que cada host abra uma porta no roteador era o maior ponto de atrito do
+> produto. O relé só vê bytes opacos (CPace + AEAD continuam ponta a ponta) e
+> a mídia continua 100% P2P. `server/` documenta como rodar seu próprio relé
+> se preferir não depender do público.
+
+**No escopo:** captura de tela inteira ou janela + áudio do sistema; múltiplos transmissores; assinatura seletiva de fluxos; autenticação por código + senha. **Failover automático de host** estava no escopo original (Fase 2, implementado) mas está **parcado** desde o pivô do relé — §18.5.
 
 **Fora do escopo nesta rodada:** microfone, webcam, gravação, chat com UI, auto-update, macOS/Linux.
 
@@ -69,57 +119,50 @@ Aplicação desktop onde várias pessoas em **casas e redes diferentes, pela int
 
 ## 2. Visão geral da arquitetura
 
-Dois planos separados, com requisitos de rede diferentes. Essa separação é a decisão central do design.
+Dois planos separados, com requisitos de rede diferentes. Essa separação é a decisão central do design — e é exatamente o que tornou o pivô do §18 possível sem tocar na mídia.
 
 | | **Plano de controle** | **Plano de mídia** |
 |---|---|---|
-| Transporte | WebSocket sobre TCP, com AEAD próprio | WebRTC (ICE/DTLS-SRTP sobre UDP) |
-| Topologia | estrela para o host + link morno para o herdeiro | estrela pelo host-SFU |
-| Onde roda | processo `main` (Node) | `renderer` (Chromium) nos clientes, `main` (werift) no host |
-| Precisa de porta de entrada | **sim, no host e no herdeiro** | não (hole punching por ICE) |
+| Transporte | WebSocket sobre TCP, com AEAD próprio, multiplexado através do relé | WebRTC (ICE/DTLS-SRTP sobre UDP) |
+| Topologia | estrela pelo **relé hospedado** (host e peers só fazem conexões de saída) | estrela pelo host-SFU |
+| Onde roda | processo `main` (Node) fala com `server/` (Node, hospedado) | `renderer` (Chromium) nos clientes, `main` (werift) no host |
+| Precisa de porta de entrada | **não, em ninguém** (§18) | não (hole punching por ICE) |
 | Volume | ~centenas de bytes/s | Mbps |
 
 ```mermaid
 flowchart TB
-    subgraph HOST["HOST (PC do criador da sala)"]
+    RELAY[["Relé hospedado (server/)<br/>WebSocket, só bytes opacos<br/>Render free tier"]]
+
+    subgraph HOST["HOST (quem criou a sala)"]
         direction TB
-        WSS["Signaling server<br/>(ws + AEAD, porta TCP mapeada)"]
+        WSS["Signaling server<br/>(ws + AEAD, sobre RelayHostLink)"]
         SFU["Mini-SFU (werift)<br/>encaminha RTP sem transcodificar"]
-        NAT["NAT mapper<br/>PCP / NAT-PMP / UPnP-IGD"]
         HUI["Renderer do host<br/>(cliente como qualquer outro, via 127.0.0.1)"]
         WSS --- SFU
-        NAT -.-> WSS
         HUI -.->|loopback| SFU
     end
 
     subgraph P1["PEER A"]
-        A1["main: signaling client"]
+        A1["main: signaling client<br/>(RelayPeerLink)"]
         A2["renderer: captura + RTCPeerConnection"]
         A1 --- A2
     end
-    subgraph P2["PEER B (herdeiro)"]
-        B1["main: signaling client<br/>+ listener morno"]
+    subgraph P2["PEER B"]
+        B1["main: signaling client"]
         B2["renderer"]
         B1 --- B2
     end
-    subgraph P3["PEER C"]
-        C1["main: signaling client"]
-        C2["renderer"]
-        C1 --- C2
-    end
 
-    A1 <-->|"controle (TCP)"| WSS
-    B1 <-->|"controle (TCP)"| WSS
-    C1 <-->|"controle (TCP)"| WSS
+    WSS <-->|"1 WS, saida apenas"| RELAY
+    A1 <-->|"1 WS, saida apenas"| RELAY
+    B1 <-->|"1 WS, saida apenas"| RELAY
 
-    A2 <==>|"mídia (SRTP/UDP)"| SFU
-    B2 <==>|"mídia (SRTP/UDP)"| SFU
-    C2 <==>|"mídia (SRTP/UDP)"| SFU
+    A2 <==>|"mídia (SRTP/UDP, direto)"| SFU
+    B2 <==>|"mídia (SRTP/UDP, direto)"| SFU
 
-    A1 -.->|"link morno"| B1
-    C1 -.->|"link morno"| B1
-
-    STUN[("STUN público<br/>descobre IP externo")] -.-> NAT
+    STUN[("STUN público<br/>hole punching de mídia")] -.-> A2
+    STUN -.-> B2
+    STUN -.-> SFU
 ```
 
 ### 2.1 Por que o SFU é nativo no `main`, e não no renderer
@@ -128,64 +171,92 @@ O caminho "óbvio" seria o renderer do host pegar o `MediaStreamTrack` recebido 
 
 Um SFU de verdade só reescreve cabeçalhos RTP (SSRC, sequência, timestamp) e re-encripta SRTP para cada destino. Custo por pacote, não por frame; **zero encoders**. Para isso precisamos de uma pilha WebRTC que nos dê acesso a RTP, o que o Chromium não expõe. Daí `werift` (WebRTC puro em TypeScript, roda em Node) no processo `main`.
 
-Efeito colateral muito bem-vindo: **o host deixa de ser especial**. O SFU é um módulo Node que qualquer instância pode ligar; o renderer do host conecta ao seu próprio SFU por `127.0.0.1`. O código do cliente é idêntico em host e peer, o que torna o failover uma troca de configuração em vez de uma troca de arquitetura.
+Efeito colateral bem-vindo: o SFU é um módulo Node que qualquer instância pode ligar; o renderer do host conecta ao seu próprio SFU por `127.0.0.1`. O código do cliente é idêntico em host e peer — o que teria tornado o failover uma troca de configuração em vez de arquitetura, se ele não estivesse parcado (§18.5).
 
-### 2.2 Por que WebSocket + AEAD próprio, e não TLS, e não data channel
+### 2.2 A sinalização é hospedada: por que um relé (v0.4)
 
-**Contra TLS:** o host é alcançado por `IP:porta` cru. Não há nome DNS nem CA possível, então só sobra certificado autoassinado — e aí a decisão de confiança fica com o usuário (TOFU, aviso de certificado, ou desabilitar validação, que é pior que não ter TLS). O handshake por senha (§6) já produz um segredo compartilhado **mutuamente autenticado**; derivar as chaves de transporte dele dá confidencialidade, integridade e autenticação *melhores* que TLS-com-certificado-autoassinado, com menos peças. Usamos `ws://` como enquadramento e cifra própria por cima (AES-256-GCM), com o handshake sendo a primeira coisa que acontece no socket.
+Resumo executivo; a arquitetura completa, o protocolo do relé, o modelo de ameaça e o deploy estão no **§18**.
 
-**Contra data channel SCTP para o controle** (desvio proposto à decisão 4 — ver §16, pergunta 1): o WebSocket com o host tem que existir de qualquer forma para trocar SDP/ICE. Um data channel exigiria, *depois disso*, ICE + DTLS + SCTP para carregar as mesmas mensagens de controle — mais código, mais latência de estabelecimento, e falha exatamente nas mesmas condições de NAT. O heartbeat sobre o WebSocket detecta precisamente o evento que importa (processo ou rede do host desaparecer). Continuamos com data channels reservados para o ponto de extensão de chat (decisão 8), aí sim sobre a mídia.
+O plano de controle (§2.2 tabela) é um WebSocket cliente-servidor: **alguém** precisa aceitar a conexão. Nas versões 0.1-0.3 esse alguém era o host, o que exigia abrir uma porta TCP no roteador (PCP/NAT-PMP/UPnP, com fallback manual) — de longe o maior ponto de atrito relatado ao usar o app. A mídia nunca teve esse problema: WebRTC/ICE faz hole punching UDP, então **só a sinalização** precisava de uma porta de entrada.
+
+A correção óbvia — meter um servidor no meio só para o WebSocket de controle — não precisa saber nada sobre a sala: ele só *encaminha* bytes entre o host e cada peer. CPace e os frames AES-256-GCM continuam ponta a ponta, então esse servidor **nunca vê a senha, o SDP, os candidatos ICE, a mídia, ou os nicknames em claro**; ele só vê `roomId`, contagem de conexões, e o IP de quem conecta (para rate limiting). Isso é o que permite hospedá-lo de graça (Render free tier) sem alargar o modelo de confiança: ele é tratado como uma rede hostil, exatamente como o ISP já era no modelo de ameaça original (§10).
+
+Com isso, host e peers passam a ter **conexões de saída apenas** — o problema de NAT/porta para a sinalização desaparece por completo. A troca é: o app agora depende de um serviço hospedado estar no ar (mitigado documentando como rodar o seu próprio, `server/README.md`) e o relé free-tier dorme após inatividade (mitigado com retry + keep-alive, §18.4).
+
+### 2.3 Por que WebSocket + AEAD próprio, e não TLS, e não data channel
+
+**Contra TLS:** o host (hoje, o relé) não tem um nome DNS com CA válida por padrão, então só sobra certificado autoassinado ou confiar na TLS terminada pelo provedor do relé — e nesse segundo caso o relé passaria a poder ler o tráfego. O handshake por senha (§6) já produz um segredo compartilhado **mutuamente autenticado entre host e peer**; derivar as chaves de transporte dele dá confidencialidade, integridade e autenticação *ponta a ponta*, que nenhuma TLS terminada num meio de caminho consegue — o relé roteia bytes cifrados que ele não consegue abrir de qualquer forma. Usamos `ws://`/`wss://` como enquadramento (`wss://` na perna cliente↔relé, para o relé; a cifra que importa é a AEAD por cima) e cifra própria por cima (AES-256-GCM), com o handshake sendo a primeira coisa que acontece no socket.
+
+**Contra data channel SCTP para o controle** (desvio proposto à decisão 4 — ver §16, pergunta 1): o WebSocket com o host (via relé) tem que existir de qualquer forma para trocar SDP/ICE. Um data channel exigiria, *depois disso*, ICE + DTLS + SCTP para carregar as mesmas mensagens de controle — mais código, mais latência de estabelecimento. O heartbeat sobre o WebSocket detecta precisamente o evento que importa (processo do host, ou seu link com o relé, desaparecer). Continuamos com data channels reservados para o ponto de extensão de chat (decisão 8), aí sim sobre a mídia.
 
 ---
 
 ## 3. Processos, módulos e IPC
 
-Estado real da árvore (`✅` = existe e testado, `🔜` = Fase 3+):
+Estado real da árvore (tudo `✅` existe e é testado, salvo indicação contrária):
 
 ```
 src/
   shared/
-    protocol.ts            ✅ esquemas zod de TODAS as mensagens (+ epoch)
+    protocol.ts            esquemas zod de TODAS as mensagens (+ epoch)
+    ipc.ts, ipc-schema.ts   contrato main <-> renderer + validação de entrada
   main/                      # Node — nada de UI
     crypto/
-      lv.ts                 ✅ leb128 / lv_cat do CPace
-      kdf.ts                ✅ Argon2id + HKDF + derivação de chaves
-      cpace.ts              ✅ PAKE ristretto255 (vetor do CFRG)
-      aead.ts               ✅ AES-256-GCM
+      lv.ts                 leb128 / lv_cat do CPace
+      kdf.ts                Argon2id + HKDF + derivação de chaves
+      cpace.ts              PAKE ristretto255 (vetor do CFRG)
+      aead.ts               AES-256-GCM
     net/
-      connection.ts         ✅ Connection: texto→binário, fila anti-corrida
-      frame-codec.ts        ✅ enquadramento + contador anti-replay
-      stun.ts               ✅ cliente STUN hand-rolled (Binding Request)
-      nat-mapping.ts        ✅ PCP/NAT-PMP/UPnP via @achingbrain/nat-port-mapper
-      local-ip.ts           ✅ IP LAN primário
-      reachability.ts       ✅ tcpReachable (probe de inboundVerified)
-      heir-probe.ts         ✅ heir_probe UDP autenticado por w
+      connection.ts         Connection: texto→binário, fila anti-corrida
+      frame-codec.ts        enquadramento + contador anti-replay
+      transport.ts          abstração Transport/ConnectionSource (§18.2); WsTransport
+      ws-source.ts          ConnectionSource local (WS direto) - só skipNat/testes
+      relay-link.ts         RelayHostLink / RelayPeerLink - clientes do relé (§18.2)
+      relay-wire.ts         formato de frame do relé, lado cliente (§18.3)
+      relay-config.ts       resolve ERROS_RELAY_URL (§18.4)
+      stun.ts               cliente STUN hand-rolled - só mídia agora
+      local-ip.ts           IP LAN primário - só mídia agora
     room/
-      base32.ts ip.ts       ✅ Base32 Crockford, IPv4/IPv6
-      room-code.ts          ✅ encode/decode do código (CRC-16)
-      host-endpoint.ts      ✅ orquestra STUN + NAT → RoomCodeData
+      base32.ts ip.ts       Base32 Crockford, IPv4/IPv6
+      room-code.ts          encode/decode do código v2: roomId+codeSalt (§5, §18.4)
     signaling/
-      handshake.ts          ✅ conduz o CPace nos dois papéis
-      server.ts             ✅ SignalingServer (host) + transferHost + crash
-      client.ts             ✅ SignalingClient (peer) + epoch + host-lost
-      roster.ts             ✅ estado autoritativo do host
-      rate-limit.ts         ✅ RateLimiter por IP
-      heartbeat.ts          ✅ ping/pong, timer-agnóstico
-      peer-node.ts          ✅ participante completo (client + responder + failover)
+      handshake.ts          conduz o CPace nos dois papéis
+      server.ts             SignalingServer (host) - roda sobre um ConnectionSource
+      client.ts             SignalingClient (peer) - roda sobre um Transport
+      roster.ts             estado autoritativo do host
+      rate-limit.ts         RateLimiter por IP
+      heartbeat.ts          ping/pong, timer-agnóstico
     election/
-      succession.ts         ✅ ordem determinística (puro)
-      failover.ts           ✅ coordenador (promote/re-home/reconnect/room-dead)
-    sfu/                     🔜 router.ts forwarder.ts governor.ts
-    app/                     🔜 lifecycle Electron, janelas, IPC handlers
-    config/                  🔜 settings.json (STUN, TURN, porta, teto de fluxos)
-  preload/                   🔜 contextBridge tipado
-  renderer/                  🔜 React pt-BR: capture/ rtc/ ui/
+      succession.ts         ordem determinística (puro) - usada só por transferHost, dormente
+    sfu/
+      router.ts             werift: 1 PC por publisher, 1 por (assinante×stream)
+      codecs.ts              VP8/VP9/H264 + Opus
+      media-plane.ts         traduz Body <-> chamadas do router
+      governor.ts             escada de qualidade (§8.5)
+    app/
+      room-session.ts        une host (server+relé) ou peer (client+relé) numa sessão
+      ipc.ts                  handlers de ipcMain
+      capture.ts              desktopCapturer + setDisplayMediaRequestHandler
+    index.ts                  entry do processo main do Electron
+  preload/
+    index.ts                  contextBridge -> window.erros
+  renderer/                   React pt-BR
+    src/App.tsx                lobby + tela de sala
+    src/rtc.ts                  useMedia(): publish/subscribe, stats, directives
+    src/{capture,CapturePanel,StreamsPanel}.tsx
+server/                       # pacote SEPARADO - o relé hospedado (§18)
+  src/index.ts                 HTTP+WS server; createRelayHttpServer() exportado p/ testes
+  src/relay.ts                  Relay: registro de salas, roteamento, rate limit
+  src/wire.ts                    formato de frame do relé, lado servidor (§18.3)
+  render.yaml                   Render Blueprint (deploy)
+parked/                       # FORA do build (nem tsc nem vitest) - §18.5
+  peer-node.ts failover.ts heir-probe.ts host-endpoint.ts nat-mapping.ts + testes
 scripts/
-  spike-sfu-throughput.mts   ✅ spike werift (docs/SPIKE-SFU.md)
-  check-network.mts          ✅ npm run check:network
+  spike-sfu-throughput.mts    spike werift (docs/SPIKE-SFU.md)
+  check-network.mts           npm run check:network (STUN/CGNAT p/ mídia)
 ```
 
-Segurança do Electron (a valer na Fase 3): `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` no renderer, CSP restritiva, `preload` expondo só um canal tipado. A rede nunca toca no renderer — tudo entra pelo `main`, é validado com `zod`, e só então vira IPC.
+Segurança do Electron: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` no renderer, CSP restritiva, `preload` expondo só um canal tipado. A rede nunca toca no renderer — tudo entra pelo `main`, é validado com `zod`, e só então vira IPC.
 
 ---
 
@@ -194,20 +265,18 @@ Segurança do Electron (a valer na Fase 3): `contextIsolation: true`, `nodeInteg
 ```mermaid
 stateDiagram-v2
     [*] --> idle
-    idle --> discovering: criar sala
-    idle --> connecting: entrar com código+senha
+    idle --> connecting: criar sala OU entrar com código+senha
 
-    discovering --> hosting: mapeamento OK (UPnP/PCP/manual)
-    discovering --> unreachable: sem porta de entrada
-    unreachable --> discovering: usuário fez port forward
-    unreachable --> idle: desistir
-
-    connecting --> authenticating: TCP aberto
-    authenticating --> in_room: PAKE + confirmação OK
-    authenticating --> rejected: senha errada / sala cheia / versão
+    connecting --> waking: o relé demorou (provável cold start)
+    waking --> connecting: relé respondeu
+    connecting --> rejected: senha errada / sala cheia / código não existe / versão
+    connecting --> left: relé fora do ar (esgotou o retry)
     rejected --> idle
 
-    hosting --> in_room: SFU no ar, roster iniciado
+    connecting --> hosting: sou o host - relé aceitou HELLO, sala criada
+    connecting --> in_room: sou peer - PAKE + confirmação OK
+
+    hosting --> in_room: (uso interno) o proprio host tambem eh um "membro"
 
     in_room --> transmitting: publicar tela
     transmitting --> in_room: parar de publicar
@@ -218,53 +287,48 @@ stateDiagram-v2
         concorrentes, nao exclusivos
     end note
 
-    in_room --> reconnecting: link com o host caiu
-    reconnecting --> in_room: reconectou ao mesmo host
-    reconnecting --> host_promotion: sou o sucessor e o host morreu
-    reconnecting --> in_room: novo host anunciado (epoch maior)
-    reconnecting --> left: esgotou tentativas / sala vazia
-
-    host_promotion --> hosting: mapeei porta e anunciei
-    host_promotion --> reconnecting: falhei, passei a vez
-
-    in_room --> left: sair
-    hosting --> left: encerrar sala (transferencia graciosa)
+    in_room --> left: sair, ou o host/relé caiu (sem failover - §18.5)
+    hosting --> left: sair (ou o link com o relé caiu)
     left --> [*]
 ```
 
-`transmitting` e `viewing` são flags sobre `in_room`, não estados exclusivos: dá para transmitir e assistir ao mesmo tempo.
+`transmitting` e `viewing` são flags sobre `in_room`, não estados exclusivos: dá para transmitir e assistir ao mesmo tempo. `waking` existe só para dar feedback visual durante um cold start do relé free-tier (§18.4) — não é um estado de erro.
 
-> **Mapeamento para o código (Fases 1–2):** `connecting`/`authenticating` = `SignalingClient.connect()` + `runPeerHandshake`; `in_room` = pós-`joined`; `reconnecting`/`host_promotion` = `Failover` + `PeerNode.#applyAction` (`reconnect-current` / `connect-heir` / `promote`); `hosting` = `PeerNode` com `#isHost = true` rodando um `SignalingServer`. `transmitting`/`viewing` ainda não existem (Fase 3).
+> **Mapeamento para o código:** `connecting`/`waking` = `RoomSession.host()`/`.join()` chamando `openWithRetry(RelayHostLink.open | RelayPeerLink.open)`, então `SignalingClient.connect()` + `runPeerHandshake` do lado peer; `in_room` = pós-`joined`; `hosting` = `RoomSession` com um `SignalingServer` ativo. `transmitting`/`viewing` vêm de `useMedia()` no renderer. **Não existe mais** `reconnecting`/`host_promotion`: eram do failover automático, parcado em §18.5 — hoje qualquer queda do host ou do relé leva direto a `left`, com uma `notice` explicando por quê.
 
 ---
 
 ## 5. Formato do código de sala
 
-O código carrega **onde** está o host e **qual** é a sala. Não carrega segredo nenhum.
+**v2 (desde o pivô do relé, §18.4).** Antes da v0.4 o código carregava onde
+estava o host (`address`+`port`) porque quem entrava discava direto nele. Com
+a sinalização hospedada, todo cliente disca o mesmo `relayUrl` (§18.4) — o
+código só precisa dizer **qual** sala, ao relé. Segue sem carregar segredo
+nenhum.
 
 ```
-byte 0      version                 (u8 = 1)
-byte 1      flags                   bit0: 0=IPv4 1=IPv6 | bit1: reservado (hostname)
-bytes 2-5   roomId                  (4 bytes aleatorios)
-bytes 6-11  codeSalt                (6 bytes aleatorios)
-bytes 12-13 port                    (u16 big-endian)
-bytes 14..  address                 (4 bytes IPv4 | 16 bytes IPv6)
-ultimos 2   crc16                   (CCITT, sobre tudo acima)
+byte 0       version                 (u8 = 2)
+bytes 1-4    roomId                  (4 bytes aleatorios - chave de sala no rele)
+bytes 5-10   codeSalt                (6 bytes aleatorios)
+ultimos 2    crc16                   (CCITT, sobre tudo acima)
 ```
 
-IPv4: corpo de 18 bytes + 2 de CRC = **20 bytes → exatamente 32 caracteres** em Base32 Crockford (maiúsculas, sem `I/L/O/U`), exibidos em grupos de 4. IPv6: 30 + 2 = **32 bytes → 52 caracteres**.
+Corpo de 11 bytes + 2 de CRC = **13 bytes → 21 caracteres** em Base32 Crockford
+(maiúsculas, sem `I/L/O/U`), exibidos em 3 grupos de 7:
 
 ```
-K7QM-4X2A-9BTR-0FDW-6HJE-3NCV-8PGY-1SZK
+K7QM4X2-A9BTR0F-DW6HJE3
 ```
 
-Entrada tolerante: normaliza minúsculas, aceita/ignora hífens e espaços, mapeia `I→1 L→1 O→0`, valida CRC-16 antes de qualquer tentativa de rede (erro de digitação é detectado localmente).
+Entrada tolerante: normaliza minúsculas, aceita/ignora hífens e espaços, mapeia `I→1 L→1 O→0`, valida CRC-16 antes de qualquer tentativa de rede (erro de digitação é detectado localmente). Um código v1 (20 ou 32 bytes) é rejeitado pelo tamanho antes mesmo de checar a versão — mensagem clara de "versão não suportada" em vez de um erro de rede confuso.
 
-**Propriedade importante:** o código pode ser compartilhado por qualquer canal inseguro. Ele não é secreto e sua integridade não é crítica — quem interceptar ou alterar o código não consegue nada, porque o PAKE (§6) impede que um host falso se autentique. A senha é o único segredo, e ela nunca trafega. Isso é o que permite mandar o código no WhatsApp sem cerimônia.
+**Propriedade importante, inalterada:** o código pode ser compartilhado por qualquer canal inseguro. Ele não é secreto e sua integridade não é crítica — quem interceptar ou alterar o código não consegue nada, porque o PAKE (§6) impede que um host falso se autentique, e o relé (§18) não autentica ninguém, só limita taxa por IP. A senha é o único segredo, e ela nunca trafega. Isso é o que permite mandar o código no WhatsApp sem cerimônia.
 
 `codeSalt` existe para que a mesma senha em salas diferentes produza chaves diferentes. Como o Argon2id quer salt de 16 bytes e não vamos inflar o código, o salt real é `HKDF-Expand(roomId ‖ codeSalt, "erros-share/argon-salt/v1", 16)` — 80 bits de unicidade, suficiente porque o salt não é secreto e o ataque de dicionário aqui é *online-only* (§6).
 
-`address` e `port` mudam quando o host muda. Consequência honesta, no README: **após um failover o código antigo fica inválido**; a UI exibe e permite copiar o código novo, e quem já estava na sala migra sem precisar dele.
+`roomId` (4 bytes = 32 bits) também é a chave que o relé usa para rotear (`server/src/relay.ts`, um `Map<roomId, Room>`); com o limite de `maxRooms` do relé (§18) na casa das centenas, a chance de colisão é desprezível, e uma colisão só produz um erro `room_exists` ao criar (o usuário tenta de novo, gera outro `roomId`) — não é uma falha de segurança.
+
+Como não há mais failover automático (§18.5), o código de uma sala em andamento não muda mais sozinho; ele só para de funcionar quando a sala termina (o host saiu, ou o link dele com o relé caiu).
 
 ---
 
@@ -383,24 +447,33 @@ Estas mensagens estão só esboçadas; nenhuma está nos schemas `zod` nem no se
 
 ### 7.4 Liveness e failover
 
-> **Implementado.** `ping`/`pong` e `host_transfer` são mensagens do envelope (`protocol.ts`). `heir_probe`/`heir_probe_reply` **não** são mensagens do envelope: são um protocolo UDP separado em `src/main/net/heir-probe.ts`, autenticado por HMAC com `kProbe = HKDF(w, "heir-probe/v1")`.
+> `ping`/`pong` estão **ativos**. `host_transfer` está implementado em `SignalingServer.transferHost()` mas **nada o chama** hoje (era acionado pelo desligamento gracioso do `PeerNode`, parcado - §18.5); ele continua no schema porque o mecanismo é barato de manter e volta a fazer sentido se o failover for revivido. `heir_probe`/`heir_probe_reply` — protocolo UDP separado, `parked/heir-probe.ts` — está **parcado** junto com o resto do failover.
 
 | mecanismo | onde | Papel |
 |---|---|---|
-| `ping` / `pong` | envelope; `heartbeat.ts` | a cada 2 s; 3 perdidos ⇒ "host-lost" / "peer-left reason:timeout" |
-| `heir_probe` / `heir_probe_reply` | **UDP**, `heir-probe.ts` | peer → herdeiro: "seu link com o host está vivo?" → `{hostAlive, epoch}` |
-| `host_transfer` | envelope | saída graciosa: `{successorPeerId, epoch}` |
+| `ping` / `pong` | envelope; `heartbeat.ts` | a cada 2 s; 3 perdidos ⇒ "host-lost" (peer) / a sala termina (host via `RoomSession`, sem promoção) |
+| `host_transfer` | envelope | **dormente** - saída graciosa: `{successorPeerId, epoch}`; nada chama `transferHost()` hoje |
+| `heir_probe` / `heir_probe_reply` | **UDP**, `parked/heir-probe.ts` | **parcado** - peer → herdeiro: "seu link com o host está vivo?" |
 | `bye` | envelope | saída limpa, com motivo |
 
-**Não implementados** e por quê:
-- `heir_designation` — desnecessário: o herdeiro é calculado de forma determinística do roster por todos (`src/main/election/succession.ts`).
-- `host_announce` — o modelo adotado é *reconnect-from-scratch*: o herdeiro promovido sobe um `SignalingServer` no `epoch+1` e os peers sobreviventes reconectam a ele pelo `inboundEndpoint` do roster (retry com backoff). O `epoch` no `joined` faz o papel do "announce".
+**Não implementados** e por quê (registro histórico, da época em que o failover era o plano):
+- `heir_designation` — desnecessário: o herdeiro seria calculado de forma determinística do roster por todos (`src/main/election/succession.ts`, ainda no tree, dormente).
+- `host_announce` — o modelo adotado era *reconnect-from-scratch*. Ver §18.5 para o que seria necessário para reviver isso sobre o relé.
 
 ---
 
 ## 8. Estabelecimento de sessão e estratégia de NAT
 
-### 8.1 Criar sala (host)
+### 8.1 Criar sala (host) — ver §18 para o fluxo atual
+
+> **Superado pelo pivô do relé (v0.4).** Esta subseção descreve como a Fase 1-2
+> criava uma sala (STUN + PCP/NAT-PMP/UPnP no roteador do host). Está mantida
+> como registro histórico e porque `parked/host-endpoint.ts` +
+> `parked/nat-mapping.ts` ainda implementam exatamente isto, caso um modo
+> "sem relé, LAN/IP direto" volte a fazer sentido no futuro. **O fluxo real
+> hoje é `RoomSession.host()` → `openWithRetry(RelayHostLink.open)` →
+> `SignalingServer({source: link})`, sem tocar em STUN/UPnP** — ver §18.1 e
+> §18.4.
 
 ```mermaid
 sequenceDiagram
@@ -429,19 +502,15 @@ sequenceDiagram
     end
 ```
 
-Detalhe que exige cuidado e é fácil errar: **STUN é UDP e não descobre o mapeamento externo de uma porta TCP.** Então o código de sala se monta assim: **IP externo vem do STUN**; **porta vem do mapeamento** (pedimos explicitamente `externalPort == internalPort`) ou do que o usuário configurou manualmente. Se o IP do STUN for igual ao IP local, não há NAT e seguimos direto.
+Detalhe que exigia cuidado e era fácil errar: **STUN é UDP e não descobre o mapeamento externo de uma porta TCP.** O código de sala se montava assim: **IP externo vinha do STUN**; **porta vinha do mapeamento** (pedíamos explicitamente `externalPort == internalPort`) ou do que o usuário configurou manualmente. Renovação: mapeamentos UPnP/PCP têm lease, renovados a cada `lease/2`. Carrier-grade NAT (IP do STUN em `100.64.0.0/10`) era detectado e reportado explicitamente.
 
-**O servidor sobe mesmo sem mapeamento.** Ele liga em `0.0.0.0:47821` de qualquer jeito — LAN e loopback funcionam na hora, e o `retryHostMapping()` (botão na UI) pode abrir a porta depois sem recriar a sala. `RoomSession.#hostContext` guarda `{roomId, codeSalt, port}` justamente pra isso.
+### 8.2 Entrar na sala e prova de alcançabilidade — parcialmente superado
 
-Renovação: mapeamentos UPnP/PCP têm lease. Renovamos a cada `lease/2` (default 30 min) e removemos no `beforeQuit`. Carrier-grade NAT (IP do STUN em `100.64.0.0/10`) é detectado e reportado explicitamente: "seu provedor usa CGNAT, você não pode ser host" — é um caso real e frequente em internet móvel/rural.
+O peer decodifica o código (v2, §5) e disca o **relé** (não mais o host direto) — `RoomSession.join()` → `openWithRetry(RelayPeerLink.open)` → `SignalingClient` roda o PAKE (§6) sobre esse link, e envia `join`.
 
-### 8.2 Entrar na sala e prova de alcançabilidade
+`join.clientCaps.inboundPort` e a verificação `inboundVerified`/`inboundEndpoint` do parágrafo original abaixo **ficaram dormentes**: com o relé no meio, o host só enxerga `ip: 'relay'` para todo mundo (§18.2) — não há mais um IP real do peer para provar alcançável. `SignalingServer` continua aceitando `verifyInbound: true` (é só uma probe TCP condicional), mas `RoomSession` não liga mais essa opção, e o campo `inboundVerified` no roster fica sempre `false` para peers. Como a eleição de sucessor que consumia esse fato está parcada (§9, §18.5), isso não tem efeito prático hoje.
 
-O peer decodifica o código, conecta TCP (timeout 8 s, tentando IPv6 e IPv4 em paralelo estilo Happy Eyeballs), faz o PAKE (§6, orçamento total 10 s), e envia `join`.
-
-Em paralelo, **cada peer tenta abrir seu próprio mapeamento na entrada**, mesmo sem intenção de ser host. Isso serve para o failover: o peer anuncia a porta em `join.clientCaps.inboundPort` e o host **tenta conectar de volta** em `IP-de-origem:porta` (hoje: só um TCP connect — o "handshake curto" de prova de identidade ainda é um TODO). Se conectar, o roster ganha `inboundVerified: true` e `inboundEndpoint: {address, port}`. O host atua como provador de alcançabilidade de todo mundo, e a eleição de sucessor (§9) trabalha com fato verificado.
-
-> **Implementado:** `src/main/net/reachability.ts` (`tcpReachable`), chamado pelo `SignalingServer` quando `verifyInbound: true`. O `PeerNode` roda um listener TCP nu na sua porta de entrada só para o probe passar; na promoção esse listener nu é trocado pelo `SignalingServer` real.
+> Texto original (Fase 1-2), preservado porque é exatamente o que `parked/` reviveria: em paralelo, cada peer tentava abrir seu próprio mapeamento na entrada, mesmo sem intenção de ser host — o peer anunciava a porta em `join.clientCaps.inboundPort` e o host tentava conectar de volta em `IP-de-origem:porta` (só um TCP connect - o "handshake curto" de prova de identidade era um TODO). Se conectasse, o roster ganhava `inboundVerified: true` e `inboundEndpoint: {address, port}`, e a eleição de sucessor (§9) trabalhava com fato verificado. Implementado em `src/main/net/reachability.ts` (`tcpReachable`); o `parked/peer-node.ts` rodava um listener TCP nu na porta de entrada só para o probe passar.
 
 ### 8.3 Mídia: ordem de tentativas ICE
 
@@ -512,7 +581,17 @@ O host manda `quality_directive`; o transmissor aplica com `setParameters({encod
 
 ---
 
-## 9. Failover de host
+## 9. Failover de host — PARCADO (§18.5)
+
+> **Todo este §9 descreve um mecanismo parcado.** Foi implementado e testado
+> na Fase 2 (`parked/{peer-node,failover,heir-probe}.ts`,
+> `src/main/election/succession.ts`), e funcionava. Ficou parcado quando a
+> sinalização migrou para o relé (v0.4): o relé v1 não tem conceito de
+> "reconectar como o mesmo host" — se o WebSocket do host cai, o relé encerra
+> a sala e avisa todo mundo (`HOST_GONE`), ponto. Reviver isto exigiria mudar
+> o **relé**, não só o cliente — ver §18.5 para o que seria necessário. O
+> texto abaixo é preservado porque a lógica (ordem de sucessão, `epoch`,
+> `heir_probe` anti-split-brain) continua correta e reaproveitável.
 
 ### 9.1 Ordem de sucessão (determinística, calculável por todos)
 
@@ -576,21 +655,24 @@ Meta de tempo: **< 10 s** do crash à mídia voltando (6 s de detecção + ~1 s 
 
 ## 10. Modelo de ameaça
 
-**Quem confia em quem.** A sala é um grupo de pessoas que já se conhecem e compartilharam uma senha por um canal externo. A confiança é *no grupo*, e o host é um membro do grupo — não um terceiro.
+**Quem confia em quem.** A sala é um grupo de pessoas que já se conhecem e compartilharam uma senha por um canal externo. A confiança é *no grupo*; o host é um membro do grupo, não um terceiro; e o **relé** (novo em v0.4, §18) é tratado como rede hostil, no mesmo nível do ISP.
 
 | Adversário | Consegue | Não consegue |
 |---|---|---|
 | Rede/ISP passivo | ver que há tráfego UDP/TCP entre os IPs, volume e horários | ler sinalização (AES-GCM) ou mídia (DTLS-SRTP) |
-| Ativo com o código, sem a senha | tentar handshakes e ser rate-limited | entrar, ver roster, nicknames, ou qualquer mídia; **e não pode atacar a senha offline** (propriedade do PAKE) |
-| Ativo tentando se passar pelo host (MITM no código) | fazer o peer conectar nele | passar a confirmação do PAKE — a conexão morre antes de qualquer dado |
-| Participante autorizado (tem a senha) | assistir qualquer transmissão, virar host por sucessão, ver todos os nicknames e IPs externos | forjar mensagens de host com `epoch` válido sem ser o herdeiro legítimo |
+| **O relé de sinalização** (§18) | ver `roomId`, quantas conexões por sala, IPs de quem conecta (rate limit), e o volume/timing dos frames que encaminha | ler o conteúdo de qualquer frame (CPace, `w`, roster, nicknames, SDP/ICE) — tudo isso é a AEAD de dentro do WebSocket, opaca para ele; **não pode**, sozinho, entrar numa sala nem forjar uma mensagem que passe na confirmação do PAKE |
+| Ativo com o código, sem a senha | tentar handshakes e ser rate-limited (pelo host E pelo relé) | entrar, ver roster, nicknames, ou qualquer mídia; **e não pode atacar a senha offline** (propriedade do PAKE) |
+| Ativo tentando se passar pelo host (comprometendo o relé, ou operando o seu próprio) | fazer o peer conectar nele | passar a confirmação do PAKE — a conexão morre antes de qualquer dado |
+| Participante autorizado (tem a senha) | assistir qualquer transmissão, ver todos os nicknames e IPs externos dos demais (a mídia continua P2P direta) | forjar mensagens de host com `epoch` válido |
 | **O host** | **ver e ouvir toda mídia que trafega, em claro** (v1) | ler a senha; ela nunca trafega |
 
-**Aceito e documentado, v1:** o host vê a mídia em claro. É aceitável porque (a) o host é um participante confiável do grupo, (b) o material que ele vê é justamente o que está sendo compartilhado com o grupo, e (c) o papel de host rotaciona apenas entre participantes já autorizados. Quem não aceitar isso: §8.4 descreve o caminho de E2EE, e o flag existe.
+**Aceito e documentado, v1:** o host vê a mídia em claro. É aceitável porque (a) o host é um participante confiável do grupo, (b) o material que ele vê é justamente o que está sendo compartilhado com o grupo, e (c) o papel de host é escolhido por quem cria a sala. Quem não aceitar isso: §8.4 descreve o caminho de E2EE, e o flag existe.
 
-**Aceito e documentado:** entrar na sala revela seu IP externo aos outros participantes (inerente ao P2P — TURN esconderia isso do resto, à custa de um relay). E a senha é tão forte quanto o grupo a escolheu: a UI vai medir e exigir um mínimo, e vai oferecer geração de senha aleatória.
+**Aceito e documentado (v0.4):** confiar num relé hospedado para a sinalização, mesmo que ele só veja metadados. Mitigado por: (1) o relé nunca vê nada que importe em claro — é o mesmo desenho de "rede hostil" que já valia para o ISP; (2) `server/README.md` documenta como rodar o seu próprio relé, para quem não quiser depender do público; (3) sem failover automático (§18.5), a superfície de "o relé decide quem é o host" nem existe — o relé só sabe qual socket chegou primeiro com HELLO `role:'host'`.
 
-**Não protege contra:** máquina comprometida de um participante, gravação de tela pelo lado de quem assiste (impossível de impedir), e engenharia social do código+senha.
+**Aceito e documentado:** entrar na sala revela seu IP externo aos outros participantes (inerente ao P2P — TURN esconderia isso do resto, à custa de um relay de mídia). E a senha é tão forte quanto o grupo a escolheu: a UI vai medir e exigir um mínimo, e vai oferecer geração de senha aleatória.
+
+**Não protege contra:** máquina comprometida de um participante, gravação de tela pelo lado de quem assiste (impossível de impedir), engenharia social do código+senha, e um operador de relé malicioso que decida derrubar salas seletivamente (disponibilidade, não confidencialidade — ele ainda não vê nem lê nada).
 
 ---
 
@@ -675,17 +757,18 @@ Cada item aqui vira uma linha na seção "Limitações conhecidas" do README (Fa
 
 **Limitações do produto (verdades a dizer, não bugs):**
 
-5. NAT simétrico nas duas pontas, sem TURN configurado → **não conecta**. A UI diz isso com esse nome.
-6. Host atrás de CGNAT → **não pode ser host**. Detectamos e dizemos.
-7. Sem UPnP e sem port forwarding manual → **não pode ser host**. A UI mostra `TCP <porta> → <IP LAN>:<porta>` e um botão "Tentar abrir a porta de novo" (`RoomSession.retryHostMapping()` — re-roda a descoberta sem derrubar o servidor). A tentativa automática repete o M-SEARCH SSDP a cada 2 s por 14 s (`nat-mapping.ts`).
-8. Após failover, **o código de sala antigo deixa de funcionar**. Quem está dentro migra sozinho; quem está fora precisa do código novo.
-9. **Sem simulcast:** um espectador com internet ruim faz o transmissor baixar a qualidade para todos.
-10. Host vê a mídia em claro (§10).
-11. Partição de rede pode gerar duas salas paralelas com o mesmo código (`epoch` divergente).
-12. O primeiro uso dispara o alerta do Firewall do Windows; sem aceitar, ninguém conecta.
-13. Sala é efêmera: esvaziou, acabou. Sem histórico, sem gravação.
-14. Windows 11 apenas. Sem auto-update.
-15. Um único monitor por transmissão (escolher "tela inteira" captura o monitor selecionado, não todos).
+5. NAT simétrico nas duas pontas, sem TURN configurado → **não conecta**. A UI diz isso com esse nome. (Isto é sobre a mídia; desde v0.4 é o **único** cenário de NAT que ainda pode te impedir de usar o app — a sinalização não depende mais de porta nenhuma.)
+6. ~~Host atrás de CGNAT → não pode ser host.~~ **Não se aplica mais desde v0.4**: hospedar não precisa de porta de entrada. CGNAT ainda pode afetar a *mídia* (cai no risco 5 acima, como qualquer outro NAT ruim), mas não impede mais alguém de criar a sala.
+7. ~~Sem UPnP e sem port forwarding manual → não pode ser host.~~ **Não se aplica mais desde v0.4**, pelo mesmo motivo. `parked/nat-mapping.ts` e o botão "Tentar abrir a porta de novo" ficaram sem uso.
+8. **A sala depende do relé hospedado estar no ar** (novo em v0.4, §18). Mitigado com retry de conexão (~75 s de orçamento, cobre o cold start do free tier) e keep-alive enquanto a sala está ativa; documentado como rodar o seu próprio relé (`server/README.md`).
+9. **O relé free-tier (Render) dorme após ~15 min sem uso e leva 30-50 s para acordar.** A primeira conexão de uma sala inativa há um tempo mostra "acordando o servidor…" em vez de conectar na hora. Ver §18.4.
+10. **Sem failover automático de host** (era o item "após failover, o código antigo deixa de funcionar" até a Fase 2 — agora a situação é mais simples e mais dura: **se o host sai ou perde o link com o relé, a sala termina** para todo mundo, sem promoção de ninguém. Implementado e testado até v0.3 (`parked/`), parcado em v0.4 — ver §18.5 para o que falta pra reviver.
+11. **Sem simulcast:** um espectador com internet ruim faz o transmissor baixar a qualidade para todos.
+12. Host vê a mídia em claro (§10).
+13. O primeiro uso dispara o alerta do Firewall do Windows; sem aceitar, ninguém conecta — isto vale pro **transporte de mídia** (a sinalização não precisa mais de regra de firewall de entrada nenhuma, já que só faz conexões de saída).
+14. Sala é efêmera: esvaziou, acabou. Sem histórico, sem gravação.
+15. Windows 11 apenas. Sem auto-update.
+16. Um único monitor por transmissão (escolher "tela inteira" captura o monitor selecionado, não todos).
 
 ---
 
@@ -719,8 +802,9 @@ Ao fim da Fase 1 o entregável demonstrável é: três instâncias em redes dife
 |---|---|---|
 | 1 | Controle sobre WebSocket vs. data channel SCTP | **WebSocket** — implementado |
 | 2 | CPace nosso vs. SRP-6a de biblioteca | **CPace** — implementado, verificado contra o vetor do CFRG |
-| 3 | Porta TCP default | **47821**, configurável (`scripts/check-network.mts` usa) |
+| 3 | Porta TCP default (do host) | **47821** — histórico; desde v0.4 a sinalização não abre porta nenhuma (§18) |
 | 4 | E2EE de mídia na v1 | **Não** — DTLS-SRTP puro, ponto de extensão via `roomMediaKey` pronto |
+| 5 | Mover a sinalização para um servidor hospedado? | **Sim** (v0.4) — relé no Render, opção A (SFU continua num peer); ver §18 |
 
 ### Ainda abertas — decidir no início da Fase 3
 
@@ -774,12 +858,14 @@ Ao fim da Fase 1 o entregável demonstrável é: três instâncias em redes dife
    - **Ainda não feito neste checkpoint:** múltiplas assinaturas por peer com renegociação (hoje 1 sub-PC por streamId, recriado a cada mudança); ICE trickle; `announceIp`/`icePortRange` do werift ainda não validados para rede real.
 4. ✅ **Encaminhamento seletivo + controle básico de qualidade.** O router emite `demand-changed` quando a contagem de assinantes de um stream cruza 0↔1; a `SfuMediaPlane` transforma isso em `quality_directive` **direcionado ao dono** (`maxKbps:0 reason:no_viewers` sem espectador, `maxKbps:<alvo> reason:restored` quando volta). `SignalingServer.sendTo(peerId, body)` para mensagens direcionadas. Renderer (`useMedia`): aplica no `RTCRtpSender` — `replaceTrack(null)` para pausar, `setParameters` com `maxBitrate`/`maxFramerate` para o alvo; expõe `publishIdle` (UI: "⏸ pausado — ninguém assistindo") e `watching` (contagem). Aviso de performance quando `watching > roomParams.maxRecommendedSubscriptions` (default 2). Multi-assinatura por peer **funciona** — 1 PC por streamId. Testes: `test/sfu/{router,media-plane}.test.ts`.
 5. ✅ **Governor de qualidade.** `src/main/sfu/governor.ts` — loop de controle puro (timer-agnóstico): escada `QUALITY_LADDER` de 4 níveis (1080p30 → 720p30 → 720p15 → 480p15), um nível por stream. Desce rápido (1 janela ruim: perda > 5% do pior assinante, ou CPU do publisher), sobe devagar (N janelas saudáveis). `stats_report` (peer → host, a cada 4 s): perda/jitter/RTT/fps por assinatura + `cpuPressure` (do `qualityLimitationReason` do Chromium)/fps por publicação. `SfuMediaPlane` roda `evaluate()` a cada 5 s e manda `quality_directive` (com `scaleDownBy`). Renderer aplica `maxBitrate`/`maxFramerate`/`scaleResolutionDownBy` no `RTCRtpSender`. Testes: `test/sfu/governor.test.ts` (8 casos, clock/stats injetados).
-6. ✅ **Mídia sobrevive ao failover.** `PeerNodeOptions.sfu` → na promoção o node cria `SfuMediaPlane` e liga ao servidor novo; `PeerNode.sendMedia`/`streams` roteiam para o plano local quando é host. Renderer `useMedia(streams, epoch)`: no bump de `epoch`, fecha todos os PCs, re-publica se estava transmitindo, e re-assina por `ownerPeerId` (estável). Teste: `test/signaling/failover.integration.test.ts` ("the promoted node runs an SFU").
+6. ✅ *(histórico - a peça que dependia disto, `PeerNode`, está parcada desde v0.4, §18.5)* **Mídia sobrevivia ao failover.** `PeerNodeOptions.sfu` → na promoção o node criava `SfuMediaPlane` e ligava ao servidor novo; `PeerNode.sendMedia`/`streams` roteavam para o plano local quando era host. O renderer `useMedia(streams, epoch)` ainda reage a um bump de `epoch` fechando/reabrindo os PCs - esse mecanismo continua correto, só nunca mais é acionado por uma promoção (não existe mais nenhuma). Teste histórico: `parked/failover.integration.test.ts`.
 7. **Teste de campo:** 2 transmitindo, 1 assistindo ambos, 1 assistindo um — em máquinas de casas diferentes. É onde a interop werift↔Chromium se prova (docs/TESTING-MEDIA.md).
 
 ### 17.2.1 Como o `RoomSession` funciona hoje (para estender)
 
-`src/main/app/room-session.ts` — `RoomSession.host(opts)` e `.join(opts)`, ambos retornam um `RoomSession` que emite `update` com um `SessionSnapshot` imutável. Host = `SignalingServer` + código; peer = `PeerNode`. `opts.skipNat` (só testes) pula STUN/UPnP e usa `127.0.0.1`. O `snapshot()` lê o roster do server (host) ou do node (peer). A Fase 3 vai adicionar aqui: iniciar/parar captura, `publish`, `subscribe`, e os campos de mídia no snapshot.
+> Atualizado para v0.4 - a versão original desta nota descrevia `PeerNode` e `opts.skipNat`; ambos não existem mais. Ver §18 para o porquê.
+
+`src/main/app/room-session.ts` — `RoomSession.host(opts)` e `.join(opts)` (estáticos, `begin()`+método de instância por baixo - §18.4) retornam/populam um `RoomSession` que emite `update` com um `SessionSnapshot` imutável. Host = `RelayHostLink` + `SignalingServer`; peer = `RelayPeerLink` + `SignalingClient` **direto** (sem intermediário - `PeerNode` está parcado). `opts.relayUrl` (testes, ou um relé próprio) sobrepõe `ERROS_RELAY_URL`/o padrão embutido. O `snapshot()` lê o roster do server (host) ou do client (peer).
 
 `src/main/app/ipc.ts` guarda **um** `RoomSession` ativo, faz `teardown` do anterior antes de criar outro, e faz `webContents.send(IPC.onUpdate, snapshot)` a cada update. Novos canais de mídia entram no `IPC` (`src/shared/ipc.ts`) + handler aqui + método no `src/preload/index.ts`.
 
@@ -788,4 +874,208 @@ Ao fim da Fase 1 o entregável demonstrável é: três instâncias em redes dife
 - Risco 1: interop werift↔Chromium (quantitativo resolvido pelo spike; negociação em aberto).
 - Risco 2: realimentação de áudio (loopback captura tudo).
 - Risco 3: áudio é do sistema, não da janela escolhida.
+- Sem simulcast na v1: um assinante com internet ruim degrada a qualidade para todos os assinantes daquele fluxo.
+
+---
+
+## 18. Sinalização hospedada: o relé (v0.4)
+
+> Ponto de entrada para retomar o trabalho no relé numa nova sessão. Motivado
+> pelo pedido do usuário: *"e se ao invés de criarmos o host local usarmos o
+> Render? [...] mas a aplicação deve ser ajustada para isso"* — a alternativa
+> a abrir porta no roteador (§8.1 antigo) é pagar o custo de operar (ou
+> confiar em) um pedaço de infraestrutura hospedada, só para a sinalização.
+
+### 18.1 Decisão e escopo
+
+Perguntado explicitamente, o usuário escolheu:
+
+- **Opção A: o relé só faz sinalização; o SFU continua num peer** (o host),
+  não no relé. Justificativa técnica (não só de custo): o Render free tier
+  fala HTTP/WebSocket — **nenhum UDP e nenhum TCP cru** — então ele
+  fisicamente não pode hospedar um SFU WebRTC. A mídia já era P2P; continua
+  sendo.
+- **Manter CPace (a autenticação por senha) através do relé.** O relé é
+  tratado como untrusted — só encaminha bytes (§18.2, §10).
+- **Não** manter o failover automático do peer-SFU no relé v1 (não foi
+  selecionado). Ver §18.5.
+- **Não** foi pedido explicitamente um keep-alive anti-sleep no menu de
+  opções, mas o pedido em prosa ("a aplicação deve ser ajustada") cobre isso:
+  implementado como retry de conexão + ping de manutenção (§18.4).
+
+### 18.2 Arquitetura: `Transport`/`ConnectionSource`, e o relé como multiplexador
+
+A mudança que tornou isto possível sem reescrever a sinalização: `Connection`
+(`src/main/net/connection.ts`) não fala mais com um `ws.WebSocket`
+diretamente — fala com um `Transport`:
+
+```ts
+interface Transport {
+  send(data: string | Uint8Array, isBinary: boolean): void;
+  close(code: number, reason: string): void;
+  readonly closed: boolean;
+  onMessage(cb: (data: Buffer, isBinary: boolean) => void): void;
+  onClose(cb: (code: number, reason: string) => void): void;
+  onError(cb: (err: Error) => void): void;
+}
+```
+
+`SignalingServer` não abre mais o `WebSocketServer` diretamente — consome um
+`ConnectionSource`, que produz um `Transport` por conexão inbound:
+
+```ts
+interface ConnectionSource {
+  onConnection(cb: (transport: Transport, ip: string) => void): void;
+  onClosed(cb: (reason: string) => void): void; // a fonte inteira caiu
+  close(): Promise<void>;
+}
+```
+
+Duas implementações de cada lado:
+
+| | local (`skipNat`/testes) | produção (relé) |
+|---|---|---|
+| `Transport` do peer | `WsTransport` (embrulha um `ws.WebSocket` 1:1) | `RelayPeerLink` |
+| `ConnectionSource` do host | `WsConnectionSource` (um `WebSocketServer` local) | `RelayHostLink` |
+
+**`RelayPeerLink`** (`src/main/net/relay-link.ts`) é **um** WebSocket real
+para o relé, exposto como **um** `Transport` — a conexão de controle do peer
+com "o host" é, na verdade, esse WS multiplexado.
+
+**`RelayHostLink`** é **um** WebSocket real para o relé, exposto como **um**
+`ConnectionSource` que gera **N `VirtualTransport`s**, um por peer conectado —
+cada `VirtualTransport` implementa `Transport` mas não tem socket próprio:
+`send()`/`close()` viram frames `DATA_H`/`KICK` mandados pelo único WS real,
+tagueados com o `connId` daquele peer (atribuído pelo relé no `PEER_UP`).
+
+O ponto central: **nem `Connection` nem `SignalingServer`/`SignalingClient`
+sabem que estão sobre um relé.** Toda a lógica de CPace, roster, heartbeat,
+rate limit, mídia continua exatamente igual - só o "cano" por baixo mudou. Isso
+é o que permitiu fazer o pivô sem reescrever a Fase 1.
+
+### 18.3 O protocolo do relé (bytes opacos, 1 byte de tipo)
+
+`server/src/wire.ts` (servidor) e `src/main/net/relay-wire.ts` (cliente) são
+**dois arquivos independentes** que precisam concordar byte a byte — `server/`
+é deliberadamente um pacote separado, com seu próprio `package.json`, para ser
+um deployable standalone sem puxar Electron/werift/etc. `test/relay/wire-compat.test.ts`
+é o que garante que eles não divirjam.
+
+```
+0x01 HELLO      cliente->rele, 1a mensagem, resto é JSON {role, roomId, app, proto, hostToken?}
+0x02 READY      rele->cliente, JSON {connId?, hostToken?}
+0x03 REJECT     rele->cliente (fecha em seguida), JSON {reason}
+0x04 PEER_UP    rele->host,   JSON {connId}
+0x05 PEER_DOWN  rele->host,   JSON {connId}
+0x06 HOST_GONE  rele->peer (fecha em seguida)
+0x07 KICK       host->rele:   [connId u32 BE]                       (derruba 1 peer)
+0x10 DATA_H     host<->rele:  [connId u32 BE][isBinary u8][payload] (por peer)
+0x11 DATA_P     peer<->rele:  [isBinary u8][payload]                (peer só tem 1 canal: o host)
+0x20 PING / 0x21 PONG   qualquer direção, sem corpo (keep-alive)
+```
+
+O relé (`server/src/relay.ts`, classe `Relay`) mantém `Map<roomId, Room>` com
+`{host: Socket, peers: Map<connId, Socket>}`. `onHello` decide o papel;
+`onMessage` roteia `DATA_H`/`DATA_P` sem olhar dentro; `onClose` faz a limpeza
+(host caiu → `HOST_GONE` pra todo mundo e a sala morre; peer caiu →
+`PEER_DOWN` pro host). Limites: `maxRooms` (500), `maxPeersPerRoom` (24),
+`roomCreatesPerWindow`/`joinsPerWindow` (10/40 por minuto por IP) — proteção
+contra abuso, não autenticação (quem autentica é o CPace, por cima).
+
+`REJECT reason` inclui `room_exists` (host tentando reusar um `roomId`),
+`no_such_room` (peer com código errado/sala já encerrada), `room_full`,
+`rate_limited`, `server_full`, `proto_mismatch`, `bad_hello`.
+`src/main/net/relay-link.ts` classifica esses motivos em
+`isRetriableRelayError()`: `no_such_room`/`room_exists`/`room_full`/
+`bad_hello`/`proto_mismatch` são fatais (tentar de novo não muda nada);
+`rate_limited`/`server_full`/qualquer falha de conexão (relé dormindo, rede)
+são a razão de existir o retry do §18.4.
+
+**Decisão de design: sem graça de reconexão do host no v1.** Se o WS do host
+cai, `onClose` já derruba a sala na hora (`HOST_GONE` + delete). Simples,
+honesto, e é exatamente a peça que teria que mudar para reviver o failover
+(§18.5).
+
+### 18.4 Cold start, keep-alive, config, e o código de sala
+
+**Cold start.** Render free tier dorme após ~15 min sem tráfego e leva 30-50 s
+para acordar. `openWithRetry()` (`relay-link.ts`) tenta `RelayHostLink.open`/
+`RelayPeerLink.open` com backoff (1.5 s × tentativa, até 6 s), por um
+orçamento default de 75 s, e chama `onWaking()` uma vez (depois de 2
+tentativas) para a UI trocar de `connecting` para `waking` — ver §4.
+`RoomSession.host()`/`.join()` usam isso; não há mais um `discoverHostEndpoint`
+bloqueando a criação da sala.
+
+**Keep-alive.** Enquanto a sala está ativa, `RelayHostLink`/`RelayPeerLink`
+mandam `PING` a cada 25 s (`KEEPALIVE_MS`). Isso serve dois papéis: o relé
+detecta uma conexão morta (`server/src/index.ts` faz `ws.ping()`/`terminate()`
+a cada 35 s se o socket não respondeu), e o tráfego periódico conta como
+"uso" para o Render não considerar a instância ociosa e dormir no meio de uma
+sala ativa. Quando a sala esvazia e todo mundo desconecta, o relé fica livre
+para dormir de novo - comportamento desejado, não um bug.
+
+**Config (`src/main/net/relay-config.ts`).** Ordem de resolução de
+`relayUrl()`: parâmetro explícito (`RoomSession.host({relayUrl})`, usado pelos
+testes) → `process.env.ERROS_RELAY_URL` (dev, ou um usuário avançado
+sobrepondo) → `process.env.ERROS_RELAY_URL_BAKED` (valor gravado no build de
+produção - ainda não automatizado; hoje é so mais uma env var) → `DEFAULT_RELAY_URL`
+(constante no código). **`DEFAULT_RELAY_URL` hoje é um placeholder**
+(`wss://erros-share-relay.onrender.com`) - precisa ser substituído pela URL
+real depois que o usuário fizer o deploy (`server/README.md`), ou o build de
+produção precisa injetar `ERROS_RELAY_URL_BAKED` nesse momento. `src/main/config/`
+(settings.json, mencionado no §3 como pendente desde a Fase 3) é onde isso
+deveria virar uma preferência editável pelo usuário, em vez de env var.
+
+**Código de sala v2.** Já coberto no §5: só `roomId`+`codeSalt`, porque o
+endereço agora é sempre o mesmo `relayUrl` para todo mundo.
+
+### 18.5 O que falta para reviver o failover automático
+
+O relé v1 encerra a sala no instante em que o WS do host cai (§18.3) - não há
+como um peer "assumir" porque o relé nem sabe que existe um candidato. Para
+reviver o mecanismo de `parked/` (que continua correto e testado) sobre o
+relé, seria preciso mudar o **relé**, não só o cliente:
+
+1. O relé guardaria a sala por uma janela de graça em vez de derrubá-la na
+   hora do `onClose` do host (`hostToken`, já emitido no `READY` do host mas
+   hoje sem uso, é o candidato natural para "prove que você é quem deveria
+   assumir" ou para um host que reconecta rápido o suficiente reclamar a
+   mesma sala).
+2. Precisaria de um jeito de **promover um peer a host** dentro da mesma sala
+   do relé - hoje os papéis são fixos no HELLO (`role: 'host' | 'peer'`); o
+   relé teria que aceitar uma mensagem tipo "eu sou o novo host desta sala"
+   vinda de um peer já conectado, reatribuir esse socket, e re-anunciar
+   `PEER_UP`/HELLO info pros sobreviventes.
+3. A ordem de sucessão (`succession.ts`) e o anti-split-brain (`heir_probe`)
+   continuam fazendo sentido - mas `heir_probe` era UDP direto entre peers
+   (`IP:porta`), que não existe mais nesse mundo; teria que virar mais uma
+   mensagem roteada pelo relé.
+4. `RoomSession` voltaria a precisar de algo como `PeerNode` para coordenar
+   isso do lado do cliente - o código em `parked/peer-node.ts` é o ponto de
+   partida, mas precisa ser reescrito para falar com `RelayPeerLink` em vez
+   de abrir seus próprios sockets.
+
+Nenhum destes é implementado. `parked/README.md` tem a versão curta desta
+lista.
+
+### 18.6 Pendências conhecidas deste pivô
+
+- **URL do relé de produção**: hoje é um placeholder (§18.4). Precisa do
+  deploy real no Render (ou onde o usuário decidir) antes do primeiro build
+  distribuído.
+- **`iceServers` da mídia**: o SFU-peer deveria ganhar uma lista de STUN
+  pública default explícita (hoje herda o que já existia da Fase 3) e
+  confirmar que funciona conectando **de saída apenas** - nenhum teste de
+  campo real foi refeito depois do pivô (era pendência já antes, §17.3 item
+  7).
+- **`src/main/config/` (settings.json)**: ainda não existe; é onde
+  `ERROS_RELAY_URL` deveria virar uma preferência editável em vez de env var.
+- **Sem botão de cancelar durante `connecting`/`waking`.** `RoomSession` já é
+  seguro para isso (`leave()` chamado nesse meio-tempo fecha o link recém
+  aberto em vez de vazar - `test/app/room-session.test.ts`, "does not leave a
+  dangling host link if leave() races the initial connect"), mas a UI
+  (`App.tsx`) desabilita os botões de Criar/Entrar enquanto a conexão está em
+  andamento e não oferece um jeito de desistir de um cold-start de até ~75 s.
+  Vale um botão "Cancelar" no Lobby quando `phase` for `connecting`/`waking`.
+- Ver §18.5 para o failover.
 - Sem simulcast na v1: um assinante com internet ruim degrada a qualidade para todos os assinantes daquele fluxo.

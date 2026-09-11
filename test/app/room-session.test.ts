@@ -1,10 +1,17 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { createServer } from 'node:net';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { RoomSession } from '../../src/main/app/room-session.js';
-import { decodeRoomCode, encodeRoomCode } from '../../src/main/room/room-code.js';
-import type { HostEndpointInfo } from '../../src/main/room/host-endpoint.js';
+import { decodeRoomCode } from '../../src/main/room/room-code.js';
 import type { SessionSnapshot } from '../../src/shared/ipc.js';
 import { MIN_ARGON_PARAMS } from '../../src/main/crypto/kdf.js';
+import { startTestRelay, type TestRelay } from '../helpers/relay.js';
+
+let relay: TestRelay;
+beforeAll(async () => {
+  relay = await startTestRelay();
+});
+afterAll(async () => {
+  await relay.close();
+});
 
 let sessions: RoomSession[] = [];
 afterEach(async () => {
@@ -21,12 +28,12 @@ function track(s: RoomSession): { last: SessionSnapshot } {
   return box;
 }
 
-describe('RoomSession', () => {
+describe('RoomSession (over the relay)', () => {
   it('hosts a room and produces a decodable code', async () => {
     const host = await RoomSession.host({
       nickname: 'pedro',
       password: 'a-senha-boa',
-      skipNat: true,
+      relayUrl: relay.url,
       argonParams: MIN_ARGON_PARAMS,
     });
     track(host);
@@ -36,7 +43,7 @@ describe('RoomSession', () => {
     expect(snap.isHost).toBe(true);
     expect(snap.code).toBeTruthy();
     const decoded = decodeRoomCode(snap.code!);
-    expect(decoded.host.address).toBe('127.0.0.1');
+    expect(decoded.roomId).toHaveLength(4);
     expect(snap.roster).toHaveLength(1);
     expect(snap.roster[0]?.isHost).toBe(true);
   });
@@ -45,7 +52,7 @@ describe('RoomSession', () => {
     const host = await RoomSession.host({
       nickname: 'host',
       password: 'segredo',
-      skipNat: true,
+      relayUrl: relay.url,
       argonParams: MIN_ARGON_PARAMS,
     });
     const hostBox = track(host);
@@ -54,8 +61,7 @@ describe('RoomSession', () => {
       nickname: 'bob',
       password: 'segredo',
       code: host.snapshot().code!,
-      skipNat: true,
-      argonParams: MIN_ARGON_PARAMS,
+      relayUrl: relay.url,
     });
     const peerBox = track(peer);
     await settle();
@@ -69,7 +75,7 @@ describe('RoomSession', () => {
     const host = await RoomSession.host({
       nickname: 'host',
       password: 'certa',
-      skipNat: true,
+      relayUrl: relay.url,
       argonParams: MIN_ARGON_PARAMS,
     });
     track(host);
@@ -79,19 +85,72 @@ describe('RoomSession', () => {
         nickname: 'mallory',
         password: 'errada',
         code: host.snapshot().code!,
-        skipNat: true,
-      argonParams: MIN_ARGON_PARAMS,
+        relayUrl: relay.url,
       }),
     ).rejects.toThrow();
     await settle();
     expect(host.snapshot().roster).toHaveLength(1);
   });
 
+  it('rejects a code from a room that does not exist on this relay', async () => {
+    // a syntactically valid code, but no host ever registered that roomId
+    const ghost = await RoomSession.host({
+      nickname: 'temp',
+      password: 'x',
+      relayUrl: relay.url,
+      argonParams: MIN_ARGON_PARAMS,
+    });
+    track(ghost);
+    const ghostCode = ghost.snapshot().code!;
+    await ghost.leave();
+    await settle();
+
+    await expect(
+      RoomSession.join({
+        nickname: 'nobody-home',
+        password: 'x',
+        code: ghostCode,
+        relayUrl: relay.url,
+      }),
+    ).rejects.toThrow(/no_such_room|rejected/i);
+  });
+
+  it('does not leave a dangling host link if leave() races the initial connect', async () => {
+    const session = RoomSession.begin();
+    track(session);
+    // leave() fires while host()'s relay connect is still in flight - it must
+    // not resolve into a live 'hosting' session, and must not leak the link.
+    const hostPromise = session.host({
+      nickname: 'race',
+      password: 'x',
+      relayUrl: relay.url,
+      argonParams: MIN_ARGON_PARAMS,
+    });
+    await session.leave();
+    await hostPromise;
+
+    const snap = session.snapshot();
+    expect(snap.phase).toBe('left');
+    expect(snap.isHost).toBe(false);
+
+    // give the relay a moment to process the host socket's close, then prove
+    // the room was actually torn down there too (not just locally).
+    await settle();
+    await expect(
+      RoomSession.join({
+        nickname: 'nobody-home',
+        password: 'x',
+        code: snap.code!,
+        relayUrl: relay.url,
+      }),
+    ).rejects.toThrow(/no_such_room/i);
+  });
+
   it('drops the peer from the host roster on leave', async () => {
     const host = await RoomSession.host({
       nickname: 'host',
       password: 'x',
-      skipNat: true,
+      relayUrl: relay.url,
       argonParams: MIN_ARGON_PARAMS,
     });
     const hostBox = track(host);
@@ -99,8 +158,7 @@ describe('RoomSession', () => {
       nickname: 'carol',
       password: 'x',
       code: host.snapshot().code!,
-      skipNat: true,
-      argonParams: MIN_ARGON_PARAMS,
+      relayUrl: relay.url,
     });
     sessions.push(peer);
     await settle();
@@ -111,64 +169,28 @@ describe('RoomSession', () => {
     expect(hostBox.last.roster.map((e) => e.nickname)).toEqual(['host']);
   });
 
-  it('offers a retry that re-runs port mapping and clears the blocker', async () => {
-    const bound = await new Promise<number>((resolve) => {
-      const s = createServer();
-      s.listen(0, '127.0.0.1', () => {
-        const p = (s.address() as { port: number }).port;
-        s.close(() => resolve(p));
-      });
-    });
-
-    let attempt = 0;
-    const discover = async ({
-      roomId,
-      codeSalt,
-      port,
-    }: {
-      port: number;
-      roomId?: Uint8Array;
-      codeSalt?: Uint8Array;
-    }): Promise<HostEndpointInfo> => {
-      attempt++;
-      const open = attempt >= 2; // first call fails, retry succeeds
-      const host = {
-        family: 'ipv4' as const,
-        address: '203.0.113.9',
-        port: bound,
-      };
-      return {
-        roomId: roomId!,
-        codeSalt: codeSalt!,
-        code: encodeRoomCode({ version: 1, roomId: roomId!, codeSalt: codeSalt!, host }),
-        endpoint: host,
-        mappingMethod: open ? 'upnp' : 'manual',
-        directlyReachable: false,
-        blocker: open ? null : 'no_inbound_path',
-        lanIp: '192.168.0.42',
-        close: async () => {},
-      };
-    };
-
+  it('ends the peer session when the relay itself goes away', async () => {
+    const oneOffRelay = await startTestRelay();
     const host = await RoomSession.host({
-      nickname: 'pedro',
+      nickname: 'host',
       password: 'x',
-      port: bound,
+      relayUrl: oneOffRelay.url,
       argonParams: MIN_ARGON_PARAMS,
-      discover: discover as never,
-      bindAddress: '127.0.0.1',
     });
-    const box = track(host);
+    track(host);
+    const peer = await RoomSession.join({
+      nickname: 'dana',
+      password: 'x',
+      code: host.snapshot().code!,
+      relayUrl: oneOffRelay.url,
+    });
+    const peerBox = track(peer);
+    await settle();
 
-    expect(box.last.codeStatus?.blocker).toBe('no_inbound_path');
-    expect(box.last.canRetryMapping).toBe(true);
-    expect(box.last.codeStatus?.manualForwardTo).toBe('192.168.0.42');
+    await oneOffRelay.close();
+    await settle();
 
-    await host.retryHostMapping();
-
-    expect(box.last.codeStatus?.blocker).toBeNull();
-    expect(box.last.codeStatus?.mappingMethod).toBe('upnp');
-    expect(box.last.canRetryMapping).toBe(false);
-    expect(box.last.notice).toMatch(/pronto para hospedar/i);
+    expect(peerBox.last.phase).toBe('left');
+    expect(peerBox.last.notice).toBeTruthy();
   });
 });

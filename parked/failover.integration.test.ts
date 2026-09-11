@@ -5,11 +5,11 @@ import {
   RTCPeerConnection,
   RTCRtpCodecParameters,
 } from 'werift';
-import { SignalingServer } from '../../src/main/signaling/server.js';
-import { PeerNode } from '../../src/main/signaling/peer-node.js';
-import { freePort } from '../helpers/free-port.js';
-import type { MediaBody } from '../../src/shared/ipc.js';
-import type { RoomParams } from '../../src/shared/protocol.js';
+import { SignalingServer } from '../src/main/signaling/server.js';
+import { PeerNode } from './peer-node.js';
+import { freePort } from '../test/helpers/free-port.js';
+import type { MediaBody } from '../src/shared/ipc.js';
+import type { RoomParams } from '../src/shared/protocol.js';
 
 const roomId = new Uint8Array([0xfa, 0x11, 0x00, 0x77]);
 const W = new Uint8Array(randomBytes(32));

@@ -60,10 +60,26 @@ function makeOpts(o: {
   };
 }
 
-function connectPeer(port: number, nickname: string, secretW = W) {
+/** Open a raw WS to the local test server and hand it to SignalingClient as a
+ *  Transport - this is the local-testing analogue of what RelayPeerLink.open()
+ *  does against the hosted relay: open the transport, THEN construct the
+ *  client, since SignalingClient no longer opens its own socket. */
+function openWs(port: number): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.once('open', () => resolve(ws));
+    ws.once('error', reject);
+  });
+}
+
+async function connectPeer(
+  port: number,
+  nickname: string,
+  secretW = W,
+): Promise<SignalingClient> {
+  const ws = await openWs(port);
   const client = new SignalingClient({
-    host: '127.0.0.1',
-    port,
+    transport: new WsTransport(ws),
     roomId,
     secret: { w: secretW },
     nickname,
@@ -76,13 +92,13 @@ describe('signaling session (Phase 1)', () => {
   it('admits three peers and converges the roster', async () => {
     const { server, port } = await startServer();
 
-    const a = connectPeer(port, 'alice');
+    const a = await connectPeer(port, 'alice');
     const ra = await a.connect();
     expect(ra.roster.map((e) => e.nickname).sort()).toEqual(['alice', 'host-pedro']);
 
-    const b = connectPeer(port, 'bob');
+    const b = await connectPeer(port, 'bob');
     await b.connect();
-    const c = connectPeer(port, 'carol');
+    const c = await connectPeer(port, 'carol');
     await c.connect();
 
     await settle();
@@ -104,7 +120,7 @@ describe('signaling session (Phase 1)', () => {
     const { server, port } = await startServer();
     const rejected = waitEvent<{ reason: string }>(server, 'peer-rejected');
 
-    const bad = connectPeer(port, 'mallory', new Uint8Array(randomBytes(32)));
+    const bad = await connectPeer(port, 'mallory', new Uint8Array(randomBytes(32)));
     await expect(bad.connect()).rejects.toThrow(/confirmation failed|wrong password/i);
     expect((await rejected).reason).toBe('bad_password');
     expect(server.roster).toHaveLength(1);
@@ -112,23 +128,25 @@ describe('signaling session (Phase 1)', () => {
 
   it('rejects a duplicate nickname', async () => {
     const { port } = await startServer();
-    await connectPeer(port, 'sam').connect();
-    await expect(connectPeer(port, 'SAM').connect()).rejects.toThrow(/duplicate/i);
+    await (await connectPeer(port, 'sam')).connect();
+    await expect((await connectPeer(port, 'SAM')).connect()).rejects.toThrow(/duplicate/i);
   });
 
   it('rejects joins once the room is full', async () => {
     const { port } = await startServer({
       roomParams: { ...roomParams, maxParticipants: 2 },
     });
-    await connectPeer(port, 'first').connect();
-    await expect(connectPeer(port, 'second').connect()).rejects.toThrow(/room_full/i);
+    await (await connectPeer(port, 'first')).connect();
+    await expect((await connectPeer(port, 'second')).connect()).rejects.toThrow(
+      /room_full/i,
+    );
   });
 
   it('broadcasts a roster_update when a peer leaves', async () => {
     const { server, port } = await startServer();
-    const a = connectPeer(port, 'alice');
+    const a = await connectPeer(port, 'alice');
     await a.connect();
-    const b = connectPeer(port, 'bob');
+    const b = await connectPeer(port, 'bob');
     await b.connect();
     await settle();
 
@@ -144,9 +162,9 @@ describe('signaling session (Phase 1)', () => {
 
   it('keeps the session alive while heartbeats are answered', async () => {
     const { port } = await startServer({ heartbeatIntervalMs: 20, heartbeatMaxMissed: 3 });
+    const ws = await openWs(port);
     const a = new SignalingClient({
-      host: '127.0.0.1',
-      port,
+      transport: new WsTransport(ws),
       roomId,
       secret: { w: W },
       nickname: 'alice',
@@ -178,10 +196,10 @@ describe('signaling session (Phase 1)', () => {
     const wrong = new Uint8Array(randomBytes(32));
 
     // two wrong-password attempts consume the burst...
-    await expect(connectPeer(port, 'x1', wrong).connect()).rejects.toThrow();
-    await expect(connectPeer(port, 'x2', wrong).connect()).rejects.toThrow();
+    await expect((await connectPeer(port, 'x1', wrong)).connect()).rejects.toThrow();
+    await expect((await connectPeer(port, 'x2', wrong)).connect()).rejects.toThrow();
     // ...the third is blocked before CPace even runs
-    await expect(connectPeer(port, 'x3', wrong).connect()).rejects.toThrow();
+    await expect((await connectPeer(port, 'x3', wrong)).connect()).rejects.toThrow();
     await settle();
 
     expect(seen.filter((r) => r === 'bad_password')).toHaveLength(2);
@@ -230,12 +248,12 @@ describe('signaling session (Phase 1)', () => {
     const inboundPort = (listener.address() as { port: number }).port;
 
     const { port } = await startServer({ verifyInbound: true });
-    const watcher = connectPeer(port, 'watcher');
+    const watcher = await connectPeer(port, 'watcher');
     await watcher.connect();
 
+    const ws = await openWs(port);
     const probed = new SignalingClient({
-      host: '127.0.0.1',
-      port,
+      transport: new WsTransport(ws),
       roomId,
       secret: { w: W },
       nickname: 'reachable',

@@ -13,14 +13,14 @@
 
 import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:net';
-import { HeirProbeResponder, heirProbe } from '../net/heir-probe.js';
-import { Failover, type FailoverAction } from '../election/failover.js';
-import { SignalingClient } from './client.js';
-import { SignalingServer } from './server.js';
-import { SfuMediaPlane } from '../sfu/media-plane.js';
-import { encodeRoomCode } from '../room/room-code.js';
-import type { MediaBody } from '../../shared/ipc.js';
-import type { RoomParams, RosterEntry, StreamInfo } from '../../shared/protocol.js';
+import { HeirProbeResponder, heirProbe } from './heir-probe.js';
+import { Failover, type FailoverAction } from './failover.js';
+import { SignalingClient } from '../src/main/signaling/client.js';
+import { SignalingServer } from '../src/main/signaling/server.js';
+import { SfuMediaPlane } from '../src/main/sfu/media-plane.js';
+import { encodeRoomCode } from '../src/main/room/room-code.js';
+import type { MediaBody } from '../src/shared/ipc.js';
+import type { RoomParams, RosterEntry, StreamInfo } from '../src/shared/protocol.js';
 
 export interface PeerNodeOptions {
   readonly host: string;

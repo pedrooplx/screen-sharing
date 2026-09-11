@@ -17,6 +17,7 @@ import {
   dataToPeer,
   decodeDataFromHost,
   decodeDataFromPeer,
+  decodeKick,
   hostGone,
   peerDown,
   peerUp,
@@ -109,6 +110,15 @@ export class Relay {
     if (!room) return;
 
     if (att.role === 'host') {
+      if (type === T.KICK) {
+        const connId = decodeKick(data);
+        const peer = connId !== null ? room.peers.get(connId) : undefined;
+        if (peer && connId !== null) {
+          room.peers.delete(connId);
+          peer.close(1000, 'kicked');
+        }
+        return;
+      }
       const frame = decodeDataFromHost(data);
       if (!frame) return;
       room.peers.get(frame.connId)?.send(

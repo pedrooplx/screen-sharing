@@ -15,7 +15,6 @@ const api: ErrosApi = {
   hostRoom: (req) => ipcRenderer.invoke(IPC.hostRoom, req),
   joinRoom: (req) => ipcRenderer.invoke(IPC.joinRoom, req),
   leaveRoom: () => ipcRenderer.invoke(IPC.leaveRoom),
-  retryMapping: () => ipcRenderer.invoke(IPC.retryMapping),
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
   listSources: () => ipcRenderer.invoke(IPC.listSources),
   setCaptureSource: (id) => ipcRenderer.invoke(IPC.setSource, id),

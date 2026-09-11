@@ -19,8 +19,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js';
-import { expandKey } from '../crypto/kdf.js';
-import { concatBytes } from '../crypto/lv.js';
+import { expandKey } from '../src/main/crypto/kdf.js';
+import { concatBytes } from '../src/main/crypto/lv.js';
 
 export class HeirProbeError extends Error {
   override name = 'HeirProbeError';

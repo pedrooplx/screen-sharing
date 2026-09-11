@@ -7,6 +7,7 @@ import {
   dataToPeer,
   decodeDataFromHost,
   decodeDataFromPeer,
+  kick,
   peerUp,
 } from '../../server/src/wire.js';
 
@@ -128,6 +129,47 @@ describe('Relay', () => {
     expect(relay.roomCount).toBe(0);
     expect(peer.lastType()).toBe(T.HOST_GONE);
     expect(peer.closed).toBe(true);
+  });
+
+  it('drops one peer on KICK without touching the others or the room', () => {
+    const relay = new Relay();
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    const a = new FakeSocket();
+    const b = new FakeSocket();
+    relay.onHello(a, hello('peer')); // connId 1
+    relay.onHello(b, hello('peer')); // connId 2
+
+    relay.onMessage(host, kick(1));
+
+    expect(a.closed).toBe(true);
+    expect(a.closeReason).toBe('kicked');
+    expect(b.closed).toBe(false);
+    expect(relay.peerCount('deadbeef')).toBe(1);
+    expect(relay.roomCount).toBe(1);
+  });
+
+  it('ignores a KICK for an unknown connId (already gone, or bogus)', () => {
+    const relay = new Relay();
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    expect(() => relay.onMessage(host, kick(999))).not.toThrow();
+    expect(relay.roomCount).toBe(1);
+  });
+
+  it('ignores a KICK sent by a peer (only the host may kick)', () => {
+    const relay = new Relay();
+    relay.onHello(new FakeSocket(), hello('host'));
+    const peer = new FakeSocket();
+    relay.onHello(peer, hello('peer'));
+    const other = new FakeSocket();
+    relay.onHello(other, hello('peer'));
+
+    // KICK is only interpreted in the `role === 'host'` branch; from a peer
+    // it fails to decode as DATA_P and is silently dropped - a peer can never
+    // drop another peer.
+    relay.onMessage(peer, kick(2));
+    expect(other.closed).toBe(false);
   });
 
   it('tells the host PEER_DOWN when a peer disconnects', () => {

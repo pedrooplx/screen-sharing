@@ -9,10 +9,10 @@
 
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { WebSocketServer, type WebSocket } from 'ws';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { Connection } from '../net/connection.js';
-import { WsTransport } from '../net/transport.js';
+import type { ConnectionSource, Transport } from '../net/transport.js';
+import { WsConnectionSource } from '../net/ws-source.js';
 import { tcpReachable } from '../net/reachability.js';
 import {
   type ArgonParams,
@@ -50,6 +50,9 @@ export interface SignalingServerOptions {
   readonly w: Uint8Array;
   readonly roomParams: RoomParams;
   readonly hostNickname: string;
+  /** where inbound Connections come from. Default: a local WebSocketServer on
+   *  `bindAddress:port` (tests only). Production passes a RelayHostLink. */
+  readonly source?: ConnectionSource;
   readonly bindAddress?: string;
   readonly port?: number;
   readonly argonParams?: ArgonParams;
@@ -71,6 +74,9 @@ export interface SignalingServerEvents {
   'peer-joined': [{ peerId: string; nickname: string }];
   'peer-left': [{ peerId: string; nickname: string; reason: 'bye' | 'timeout' }];
   'peer-rejected': [{ ip: string; reason: string }];
+  /** the connection source itself is gone (relay link dropped, local wss
+   *  failed) - unlike `error`, this means the room cannot continue */
+  'source-closed': [{ reason: string }];
   error: [Error];
 }
 
@@ -89,7 +95,8 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
   readonly #roster: Roster;
   readonly #hostPeerId: string;
   readonly #links = new Map<string, PeerLink>();
-  #wss: WebSocketServer | undefined;
+  #source: ConnectionSource | undefined;
+  #ownsSource = false;
   #activeHandshakes = 0;
   #closing = false;
 
@@ -123,26 +130,34 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
     return this.#roster.snapshot();
   }
 
+  /** Start accepting connections. Returns the bound port for the local
+   *  WebSocketServer path, or -1 when running over an injected source. */
   async listen(): Promise<{ port: number }> {
-    const wss = new WebSocketServer({
-      host: this.#opts.bindAddress ?? '127.0.0.1',
-      port: this.#opts.port ?? 0,
-    });
-    this.#wss = wss;
-    wss.on('connection', (ws, req) => {
-      const ip = req.socket.remoteAddress ?? 'unknown';
-      void this.#handleConnection(ws, ip);
-    });
-    wss.on('error', (err) => this.emit('error', err));
-    await new Promise<void>((resolve, reject) => {
-      wss.once('listening', resolve);
-      wss.once('error', reject);
-    });
-    const addr = wss.address();
-    if (typeof addr === 'string' || addr === null) {
-      throw new Error('WebSocketServer did not bind a TCP port');
+    let boundPort = -1;
+    if (this.#opts.source) {
+      this.#source = this.#opts.source;
+    } else {
+      const ws = new WsConnectionSource();
+      const { port } = await ws.listen(
+        this.#opts.bindAddress ?? '127.0.0.1',
+        this.#opts.port ?? 0,
+      );
+      boundPort = port;
+      this.#source = ws;
+      this.#ownsSource = true;
     }
-    return { port: addr.port };
+    this.#source.onConnection((transport, ip) => {
+      void this.#handleConnection(transport, ip);
+    });
+    this.#source.onClosed((reason) => {
+      if (!this.#closing) this.emit('source-closed', { reason });
+    });
+    return { port: boundPort };
+  }
+
+  /** Was this server started over an injected (relay) source? */
+  get overRelay(): boolean {
+    return this.#opts.source !== undefined;
   }
 
   /**
@@ -202,8 +217,12 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
       link.conn.close(4001, 'crash');
     }
     this.#links.clear();
-    this.#wss?.close();
-    this.#wss = undefined;
+    if (this.#ownsSource && this.#source instanceof WsConnectionSource) {
+      this.#source.terminate();
+    } else {
+      void this.#source?.close();
+    }
+    this.#source = undefined;
   }
 
   async close(): Promise<void> {
@@ -219,13 +238,14 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
       link.conn.close(1001, 'room closing');
     }
     this.#links.clear();
-    if (this.#wss) {
-      await new Promise<void>((resolve) => this.#wss!.close(() => resolve()));
+    if (this.#source) {
+      await this.#source.close();
+      this.#source = undefined;
     }
   }
 
-  async #handleConnection(ws: WebSocket, ip: string): Promise<void> {
-    const conn = new Connection(new WsTransport(ws), 'host');
+  async #handleConnection(transport: Transport, ip: string): Promise<void> {
+    const conn = new Connection(transport, 'host');
     conn.outboundFrom = this.#hostPeerId;
     conn.epoch = this.#epoch;
 

@@ -33,12 +33,9 @@ function idleSnapshot(): SessionSnapshot {
     nickname: '',
     epoch: 0,
     code: null,
-    codeStatus: null,
     roster: [],
     streams: [],
     maxRecommendedSubscriptions: 2,
-    canRetryMapping: false,
-    retryingMapping: false,
     notice: null,
   };
 }
@@ -60,10 +57,27 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   const teardown = async () => {
     if (session) {
-      session.removeAllListeners();
-      await session.leave().catch(() => {});
+      const s = session;
+      s.removeAllListeners();
       session = null;
+      await s.leave().catch(() => {});
     }
+  };
+
+  /**
+   * Clean up exactly `s` (a specific session this handler created), without
+   * disturbing whatever `session` points to now. host()/join() can take up to
+   * ~75s (relay cold start, §18.4 in DESIGN.md); if a later IPC call already
+   * superseded `s` via teardown() in the meantime, `session` is a DIFFERENT,
+   * newer RoomSession by the time this handler's `await s.host()/.join()`
+   * finally settles - naively calling `teardown()` again here would tear down
+   * that unrelated, currently-active room instead. `s` itself still needs
+   * cleanup regardless (it may hold a real relay link / SignalingServer).
+   */
+  const discard = async (s: RoomSession) => {
+    s.removeAllListeners();
+    if (session === s) session = null;
+    await s.leave().catch(() => {});
   };
 
   ipcMain.handle(
@@ -71,17 +85,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     async (_e, raw: HostRoomRequest): Promise<IpcResult<SessionSnapshot>> => {
       const parsed = hostRoomRequestSchema.safeParse(raw);
       if (!parsed.success) return { ok: false, error: 'pedido inválido' };
+      await teardown();
+      // begin() + attach() before host() runs, so the renderer actually sees
+      // 'connecting'/'waking' while a sleeping relay wakes up (~30-50s).
+      const s = RoomSession.begin();
+      attach(s);
       try {
-        await teardown();
-        const s = await RoomSession.host({
-          nickname: parsed.data.nickname,
-          password: parsed.data.password,
-          ...(parsed.data.port ? { port: parsed.data.port } : {}),
-        });
-        attach(s);
+        await s.host({ nickname: parsed.data.nickname, password: parsed.data.password });
         return { ok: true, value: s.snapshot() };
       } catch (err) {
         log.error('hostRoom failed', err);
+        await discard(s);
         return { ok: false, error: (err as Error).message };
       }
     },
@@ -92,20 +106,19 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     async (_e, raw: JoinRoomRequest): Promise<IpcResult<SessionSnapshot>> => {
       const parsed = joinRoomRequestSchema.safeParse(raw);
       if (!parsed.success) return { ok: false, error: 'pedido inválido' };
+      await teardown();
+      const s = RoomSession.begin();
+      attach(s);
       try {
-        await teardown();
-        const s = await RoomSession.join({
+        await s.join({
           nickname: parsed.data.nickname,
           password: parsed.data.password,
           code: parsed.data.code,
-          ...(parsed.data.inboundPort
-            ? { inboundPort: parsed.data.inboundPort }
-            : {}),
         });
-        attach(s);
         return { ok: true, value: s.snapshot() };
       } catch (err) {
         log.error('joinRoom failed', err);
+        await discard(s);
         return { ok: false, error: (err as Error).message };
       }
     },
@@ -117,20 +130,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     push(snap);
     return { ok: true, value: snap };
   });
-
-  ipcMain.handle(
-    IPC.retryMapping,
-    async (): Promise<IpcResult<SessionSnapshot>> => {
-      if (!session) return { ok: false, error: 'nenhuma sala ativa' };
-      try {
-        await session.retryHostMapping();
-        return { ok: true, value: session.snapshot() };
-      } catch (err) {
-        log.error('retryHostMapping failed', err);
-        return { ok: false, error: (err as Error).message };
-      }
-    },
-  );
 
   ipcMain.handle(IPC.getSnapshot, (): SessionSnapshot => {
     return session?.snapshot() ?? idleSnapshot();

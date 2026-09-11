@@ -1,33 +1,39 @@
 /**
- * Assembles everything a host needs to publish a room code (docs/DESIGN.md
- * section 8.1):
+ * PARKED (see parked/README.md) - stale against room-code v2. Assembled a room
+ * code that carried the host's own IP:port (docs/DESIGN.md section 8.1):
  *
  *   - external IP  <- STUN  (a UDP probe; STUN cannot see a TCP mapping)
  *   - external port <- the NAT mapping we asked for (or the manual port)
  *   - roomId + codeSalt <- fresh random
  *
- * Also reports the conditions that make hosting impossible so the UI can say so
- * plainly: carrier-grade NAT, or no inbound path at all.
+ * Also reported the conditions that made hosting impossible: carrier-grade
+ * NAT, or no inbound path at all.
+ *
+ * Since signaling moved to the relay, `RoomCodeData` no longer has a `host`
+ * field (the code only needs `roomId` + `codeSalt`; every client dials the
+ * same relay URL) - this file will not compile as-is. It is kept for a future
+ * "self-host the relay too, and skip it for LAN-only rooms" mode, where a
+ * direct IP:port path could still be worth offering as an option.
  */
 
 import { randomBytes } from 'node:crypto';
 import {
   type ActiveMapping,
   mapInboundPort,
-} from '../net/nat-mapping.js';
+} from './nat-mapping.js';
 import {
   DEFAULT_STUN_SERVERS,
   type StunServer,
   discoverExternalAddress,
   isCarrierGradeNat,
-} from '../net/stun.js';
-import { allLanIpv4, primaryLanIpv4 } from '../net/local-ip.js';
+} from '../src/main/net/stun.js';
+import { allLanIpv4, primaryLanIpv4 } from '../src/main/net/local-ip.js';
 import {
   CODE_SALT_BYTES,
   ROOM_ID_BYTES,
   type RoomCodeData,
   encodeRoomCode,
-} from './room-code.js';
+} from '../src/main/room/room-code.js';
 
 export type HostBlocker = 'carrier_grade_nat' | 'no_inbound_path' | null;
 

@@ -11,6 +11,7 @@
  *   0x04 PEER_UP    relay->host, JSON {connId}
  *   0x05 PEER_DOWN  relay->host, JSON {connId}
  *   0x06 HOST_GONE  relay->peer (then close)
+ *   0x07 KICK       host->relay:   [0x07][connId u32 BE]  (drop one peer)
  *   0x10 DATA_H     host<->relay:  [0x10][connId u32 BE][isBinary u8][payload]
  *   0x11 DATA_P     peer<->relay:  [0x11][isBinary u8][payload]
  *   0x20 PING / 0x21 PONG   either direction, no body (relay-level keep-alive)
@@ -27,6 +28,7 @@ export const T = {
   PEER_UP: 0x04,
   PEER_DOWN: 0x05,
   HOST_GONE: 0x06,
+  KICK: 0x07,
   DATA_H: 0x10,
   DATA_P: 0x11,
   PING: 0x20,
@@ -109,4 +111,16 @@ export function dataToHost(
   head.writeUInt32BE(connId, 1);
   head[5] = isBinary ? 1 : 0;
   return Buffer.concat([head, payload]);
+}
+
+export function kick(connId: number): Buffer {
+  const b = Buffer.alloc(5);
+  b[0] = T.KICK;
+  b.writeUInt32BE(connId, 1);
+  return b;
+}
+
+export function decodeKick(buf: Buffer): number | null {
+  if (buf.length < 5 || buf[0] !== T.KICK) return null;
+  return buf.readUInt32BE(1);
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { StreamInfo } from '../../shared/ipc.js';
 import type { RosterEntry } from '../../shared/ipc.js';
 import type { MediaEngine } from './rtc.js';
@@ -104,10 +104,7 @@ function WatchTile({
         )}
       </div>
       <div className="watch-meta">
-        <span className="name">
-          {owner}
-          {stream.audio ? ' 🔊' : ''}
-        </span>
+        <span className="name">{owner}</span>
         <span className="watch-actions">
           {remote && (
             <button className="ghost" onClick={maximize} title="Maximizar">
@@ -125,6 +122,47 @@ function WatchTile({
           )}
         </span>
       </div>
+      {remote && stream.audio && <VolumeControl videoRef={ref} />}
+    </div>
+  );
+}
+
+function VolumeControl({ videoRef }: { videoRef: RefObject<HTMLVideoElement | null> }) {
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (el) {
+      el.volume = volume;
+      el.muted = muted;
+    }
+  }, [videoRef, volume, muted]);
+
+  const icon = muted || volume === 0 ? '🔇' : volume < 0.5 ? '🔉' : '🔊';
+
+  return (
+    <div className="volume-control">
+      <button
+        className="icon-btn"
+        onClick={() => setMuted((m) => !m)}
+        title={muted ? 'Ativar som' : 'Mudo'}
+      >
+        {icon}
+      </button>
+      <input
+        type="range"
+        className="volume-slider"
+        min={0}
+        max={100}
+        value={Math.round((muted ? 0 : volume) * 100)}
+        onChange={(e) => {
+          const next = Number(e.target.value) / 100;
+          setVolume(next);
+          if (next > 0 && muted) setMuted(false);
+        }}
+        title="Volume da transmissão"
+      />
     </div>
   );
 }

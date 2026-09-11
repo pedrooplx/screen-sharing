@@ -348,6 +348,27 @@ label {
   gap: 6px;
   flex-shrink: 0;
 }
+.volume-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+.volume-control .icon-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.volume-slider {
+  flex: 1;
+  accent-color: var(--accent);
+  height: 4px;
+  cursor: pointer;
+}
 
 .port-help {
   margin-top: 12px;

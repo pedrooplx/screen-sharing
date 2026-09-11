@@ -23,6 +23,18 @@ npm run build && npm start        # :8787
 
 `GET /healthz` → `{"ok":true,"rooms":N}`.
 
+**`typescript`/`@types/*` estão em `dependencies`, não `devDependencies`, de
+propósito.** Render (e a maioria dos PaaS que rodam `buildCommand`+
+`startCommand` no mesmo container) fazem `npm ci` com `NODE_ENV=production`
+já setado no ambiente de build — e a partir do npm 9, isso faz o `npm ci`
+pular `devDependencies` silenciosamente. Como o build (`tsc`) roda *depois*
+desse install, ele quebra com `TS2688: Cannot find type definition file for
+'node'` (ou qualquer outro `@types/*`/o próprio `tsc` faltando). Não tem
+"build stage" separado aqui pra isolar isso — então a correção é manter as
+ferramentas de build como dependência normal. Custo: uns poucos MB extras em
+`node_modules` que sobrevivem até o runtime, sem efeito prático (nada em
+`dist/` os importa).
+
 ## Deploy no Render (grátis)
 
 Veja [`render.yaml`](render.yaml). Resumo: fork do repo → Render → New → Blueprint

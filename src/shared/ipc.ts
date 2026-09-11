@@ -65,6 +65,7 @@ export const IPC = {
   listSources: 'capture:list-sources',
   setSource: 'capture:set-source',
   copyToClipboard: 'session:copy-to-clipboard',
+  setFloating: 'window:set-floating',
   sendMedia: 'media:send',
   // main -> renderer
   onUpdate: 'session:update',
@@ -90,6 +91,16 @@ export interface ErrosApi {
    * `navigator.clipboard.writeText()` would silently fail here.
    */
   copyToClipboard(text: string): Promise<IpcResult<null>>;
+  /**
+   * Shrink the app's own window into a small, resizable, always-on-top
+   * widget (floating=true) or restore it to its normal size (false). Used
+   * for the "watch this stream in a floating window" feature - a real OS
+   * window has no platform-imposed size ceiling, unlike video
+   * Picture-in-Picture (Chromium caps that around 80% of the screen) or
+   * Document Picture-in-Picture (its browser-side window delegate isn't
+   * implemented in Electron, so requestWindow() never settles there).
+   */
+  setFloating(floating: boolean): Promise<IpcResult<null>>;
   /** send a media negotiation body (publish_offer, subscribe, subscribe_answer, ...) */
   sendMedia(body: MediaBody): void;
   /** media bodies coming back (publish_answer, subscribe_offer, stream_state, media_error) */

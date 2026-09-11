@@ -98,6 +98,10 @@ export function installMock(): void {
         return { ok: false, error: (err as Error).message };
       }
     },
+    async setFloating() {
+      // no real OS window to resize in the plain-browser preview
+      return { ok: true, value: null };
+    },
     sendMedia() {
       /* no SFU in mock mode */
     },

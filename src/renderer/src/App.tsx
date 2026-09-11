@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SessionSnapshot } from '../../shared/ipc.js';
 import type { RosterEntry } from '../../shared/protocol.js';
 import { CapturePanel } from './CapturePanel.js';
-import { StreamsPanel } from './StreamsPanel.js';
-import { useMedia } from './rtc.js';
+import { StreamsPanel, VolumeControl } from './StreamsPanel.js';
+import { useMedia, type MediaEngine } from './rtc.js';
 
 const IDLE: SessionSnapshot = {
   phase: 'idle',
@@ -41,6 +41,59 @@ export function App() {
     );
   }
 
+  return <Connected snap={snap} />;
+}
+
+/**
+ * Split out from App so useMedia() (and everything downstream of it) only
+ * ever runs once window.erros is known to exist - App's own early return
+ * above happens before this component is even mounted, so that guard never
+ * has to be re-checked here.
+ */
+function Connected({ snap }: { snap: SessionSnapshot }) {
+  const media = useMedia(snap.streams, snap.epoch);
+  const [floatingStreamId, setFloatingStreamId] = useState<string | null>(null);
+
+  const restore = useCallback(() => {
+    setFloatingStreamId(null);
+    void window.erros.setFloating(false);
+  }, []);
+
+  const float = useCallback((streamId: string) => {
+    setFloatingStreamId(streamId);
+    void window.erros.setFloating(true);
+  }, []);
+
+  // the owner ended their stream while we were floating it - don't leave the
+  // widget stuck on a frozen frame with no way to tell it's dead.
+  useEffect(() => {
+    if (floatingStreamId && !media.remote.get(floatingStreamId)) restore();
+  }, [floatingStreamId, media.remote, restore]);
+
+  // Esc is the conventional way out of a floating/PiP-like view.
+  useEffect(() => {
+    if (!floatingStreamId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') restore();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [floatingStreamId, restore]);
+
+  if (floatingStreamId) {
+    const owner =
+      snap.roster.find(
+        (e) => e.peerId === snap.streams.find((s) => s.streamId === floatingStreamId)?.ownerPeerId,
+      )?.nickname ?? 'alguém';
+    return (
+      <FloatingVideo
+        stream={media.remote.get(floatingStreamId) ?? null}
+        owner={owner}
+        onRestore={restore}
+      />
+    );
+  }
+
   const inRoom = snap.phase === 'in-room' || snap.phase === 'hosting';
 
   return (
@@ -50,10 +103,52 @@ export function App() {
       </div>
       {snap.notice && <div className="notice">{snap.notice}</div>}
       {inRoom ? (
-        <Room snap={snap} />
+        <Room snap={snap} media={media} onFloat={float} />
       ) : (
         <Lobby phase={snap.phase} />
       )}
+    </div>
+  );
+}
+
+/**
+ * Full-bleed view shown while the app's own window is shrunk into a small,
+ * resizable, always-on-top widget (see main's IPC.setFloating handler) - a
+ * real OS window has no platform-imposed size ceiling, unlike video
+ * Picture-in-Picture (Chromium caps that around 80% of the screen) or
+ * Document Picture-in-Picture (unsupported in this Electron build - its
+ * requestWindow() never settles, which is why the button did nothing before).
+ */
+function FloatingVideo({
+  stream,
+  owner,
+  onRestore,
+}: {
+  stream: MediaStream | null;
+  owner: string;
+  onRestore: () => void;
+}) {
+  const ref = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (el) {
+      el.srcObject = stream;
+      if (stream) void el.play().catch(() => {});
+    }
+    return () => {
+      if (el) el.srcObject = null;
+    };
+  }, [stream]);
+
+  return (
+    <div className="floating-video">
+      <video ref={ref} autoPlay playsInline />
+      <span className="floating-name">{owner}</span>
+      <button className="floating-restore" onClick={onRestore} title="Restaurar (Esc)">
+        ⤢
+      </button>
+      {stream && stream.getAudioTracks().length > 0 && <VolumeControl videoRef={ref} />}
     </div>
   );
 }
@@ -187,10 +282,17 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
   );
 }
 
-function Room({ snap }: { snap: SessionSnapshot }) {
+function Room({
+  snap,
+  media,
+  onFloat,
+}: {
+  snap: SessionSnapshot;
+  media: MediaEngine;
+  onFloat: (streamId: string) => void;
+}) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | undefined>(undefined);
-  const media = useMedia(snap.streams, snap.epoch);
 
   const copy = useCallback(async () => {
     if (!snap.code) return;
@@ -243,6 +345,7 @@ function Room({ snap }: { snap: SessionSnapshot }) {
         streams={snap.streams}
         roster={snap.roster}
         selfPeerId={snap.selfPeerId}
+        onFloat={onFloat}
       />
 
       <div className="card">

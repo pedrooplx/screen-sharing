@@ -4,7 +4,7 @@
  * in the renderer.
  */
 
-import { clipboard, ipcMain, type BrowserWindow } from 'electron';
+import { clipboard, ipcMain, type BrowserWindow, type Rectangle } from 'electron';
 import log from 'electron-log/main.js';
 import { RoomSession } from './room-session.js';
 import { listSources, setPendingSource } from './capture.js';
@@ -24,6 +24,12 @@ import {
 } from '../../shared/ipc-schema.js';
 
 let session: RoomSession | null = null;
+
+/** bounds/minimum-size to restore when leaving floating mode - null when not floating */
+let floatingSaved: { bounds: Rectangle; minSize: [number, number] } | null = null;
+const FLOATING_SIZE = { width: 480, height: 270 };
+// small enough to feel like a real floating widget, still legible at 16:9
+const FLOATING_MIN_SIZE: [number, number] = [240, 135];
 
 function idleSnapshot(): SessionSnapshot {
   return {
@@ -165,6 +171,40 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         return { ok: false, error: 'texto inválido' };
       }
       clipboard.writeText(text);
+      return { ok: true, value: null };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.setFloating,
+    (_e, floating: unknown): IpcResult<null> => {
+      if (typeof floating !== 'boolean') return { ok: false, error: 'valor inválido' };
+      const win = getWindow();
+      if (!win) return { ok: false, error: 'janela indisponível' };
+      if (floating) {
+        if (!floatingSaved) {
+          const size = win.getMinimumSize();
+          floatingSaved = { bounds: win.getBounds(), minSize: [size[0] ?? 0, size[1] ?? 0] };
+        }
+        // setBounds() on a currently-maximized window is unreliable on
+        // Windows - it can snap back to the OS's own tracked pre-maximize
+        // rect instead of the bounds just requested. The user maximizing the
+        // floating widget via the native title-bar button (exactly what "no
+        // size limit, up to full screen" invites) leaves the window zoomed,
+        // so this has to be unwound before setBounds in either direction.
+        if (win.isMaximized()) win.unmaximize();
+        win.setMinimumSize(...FLOATING_MIN_SIZE);
+        // 'floating' (not 'screen-saver'): stay above normal windows without
+        // fighting genuinely system-critical always-on-top UI.
+        win.setAlwaysOnTop(true, 'floating');
+        win.setBounds({ ...FLOATING_SIZE, x: floatingSaved.bounds.x, y: floatingSaved.bounds.y });
+      } else if (floatingSaved) {
+        if (win.isMaximized()) win.unmaximize();
+        win.setAlwaysOnTop(false);
+        win.setMinimumSize(...floatingSaved.minSize);
+        win.setBounds(floatingSaved.bounds);
+        floatingSaved = null;
+      }
       return { ok: true, value: null };
     },
   );

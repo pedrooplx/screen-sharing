@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { RoomSession } from '../../src/main/app/room-session.js';
-import { decodeRoomCode } from '../../src/main/room/room-code.js';
 import type { SessionSnapshot } from '../../src/shared/ipc.js';
 import { MIN_ARGON_PARAMS } from '../../src/main/crypto/kdf.js';
 import { startTestRelay, type TestRelay } from '../helpers/relay.js';
@@ -29,7 +28,7 @@ function track(s: RoomSession): { last: SessionSnapshot } {
 }
 
 describe('RoomSession (over the relay)', () => {
-  it('hosts a room and produces a decodable code', async () => {
+  it('hosts the (single, fixed) room', async () => {
     const host = await RoomSession.host({
       nickname: 'pedro',
       password: 'a-senha-boa',
@@ -41,14 +40,11 @@ describe('RoomSession (over the relay)', () => {
 
     expect(snap.phase).toBe('hosting');
     expect(snap.isHost).toBe(true);
-    expect(snap.code).toBeTruthy();
-    const decoded = decodeRoomCode(snap.code!);
-    expect(decoded.roomId).toHaveLength(4);
     expect(snap.roster).toHaveLength(1);
     expect(snap.roster[0]?.isHost).toBe(true);
   });
 
-  it('lets a peer join with the code + password and both see the roster', async () => {
+  it('lets a peer join with just nickname + password and both see the roster', async () => {
     const host = await RoomSession.host({
       nickname: 'host',
       password: 'segredo',
@@ -60,7 +56,6 @@ describe('RoomSession (over the relay)', () => {
     const peer = await RoomSession.join({
       nickname: 'bob',
       password: 'segredo',
-      code: host.snapshot().code!,
       relayUrl: relay.url,
     });
     const peerBox = track(peer);
@@ -84,7 +79,6 @@ describe('RoomSession (over the relay)', () => {
       RoomSession.join({
         nickname: 'mallory',
         password: 'errada',
-        code: host.snapshot().code!,
         relayUrl: relay.url,
       }),
     ).rejects.toThrow();
@@ -92,24 +86,11 @@ describe('RoomSession (over the relay)', () => {
     expect(host.snapshot().roster).toHaveLength(1);
   });
 
-  it('rejects a code from a room that does not exist on this relay', async () => {
-    // a syntactically valid code, but no host ever registered that roomId
-    const ghost = await RoomSession.host({
-      nickname: 'temp',
-      password: 'x',
-      relayUrl: relay.url,
-      argonParams: MIN_ARGON_PARAMS,
-    });
-    track(ghost);
-    const ghostCode = ghost.snapshot().code!;
-    await ghost.leave();
-    await settle();
-
+  it('rejects joining when nobody is hosting the room yet', async () => {
     await expect(
       RoomSession.join({
         nickname: 'nobody-home',
         password: 'x',
-        code: ghostCode,
         relayUrl: relay.url,
       }),
     ).rejects.toThrow(/no_such_room|rejected/i);
@@ -134,13 +115,13 @@ describe('RoomSession (over the relay)', () => {
     expect(snap.isHost).toBe(false);
 
     // give the relay a moment to process the host socket's close, then prove
-    // the room was actually torn down there too (not just locally).
+    // the room was actually torn down there too (not just locally) - the
+    // fixed room id is free again for the next join attempt to fail against.
     await settle();
     await expect(
       RoomSession.join({
         nickname: 'nobody-home',
         password: 'x',
-        code: snap.code!,
         relayUrl: relay.url,
       }),
     ).rejects.toThrow(/no_such_room/i);
@@ -157,7 +138,6 @@ describe('RoomSession (over the relay)', () => {
     const peer = await RoomSession.join({
       nickname: 'carol',
       password: 'x',
-      code: host.snapshot().code!,
       relayUrl: relay.url,
     });
     sessions.push(peer);
@@ -181,7 +161,6 @@ describe('RoomSession (over the relay)', () => {
     const peer = await RoomSession.join({
       nickname: 'dana',
       password: 'x',
-      code: host.snapshot().code!,
       relayUrl: oneOffRelay.url,
     });
     const peerBox = track(peer);

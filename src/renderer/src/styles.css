@@ -133,24 +133,6 @@ label {
   font-size: 13px;
 }
 
-.code-box {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
-  font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
-  font-size: 15px;
-  letter-spacing: 0.06em;
-  user-select: text;
-}
-.code-box span {
-  flex: 1;
-  overflow-wrap: anywhere;
-}
-
 .pill {
   display: inline-flex;
   align-items: center;

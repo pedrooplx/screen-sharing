@@ -14,7 +14,6 @@ let state: SessionSnapshot = {
   selfPeerId: '',
   nickname: '',
   epoch: 0,
-  code: null,
   roster: [],
   streams: [],
   maxRecommendedSubscriptions: 2,
@@ -36,7 +35,6 @@ export function installMock(): void {
         isHost: true,
         selfPeerId: 'p_host',
         epoch: 0,
-        code: 'K7QM4X2-A9BTR0F-DW6HJE3',
         notice: null,
         roster: [
           rosterEntry('p_host', nickname, 0, true, true),
@@ -68,7 +66,6 @@ export function installMock(): void {
       set({
         phase: 'idle',
         isHost: false,
-        code: null,
         roster: [],
         notice: null,
       });
@@ -87,16 +84,6 @@ export function installMock(): void {
     },
     async setCaptureSource() {
       return { ok: true, value: null };
-    },
-    async copyToClipboard(text) {
-      // outside Electron's locked-down permission handler, the real
-      // Clipboard API works fine for this dev-only mock.
-      try {
-        await navigator.clipboard.writeText(text);
-        return { ok: true, value: null };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
     },
     async setFloating() {
       // no real OS window to resize in the plain-browser preview

@@ -25,7 +25,6 @@ export interface SessionSnapshot {
   readonly selfPeerId: string;
   readonly nickname: string;
   readonly epoch: number;
-  readonly code: string | null;
   readonly roster: RosterEntry[];
   readonly streams: StreamInfo[];
   /** soft cap on simultaneous subscriptions before the UI warns */
@@ -41,7 +40,6 @@ export interface HostRoomRequest {
 export interface JoinRoomRequest {
   readonly nickname: string;
   readonly password: string;
-  readonly code: string;
 }
 
 export type IpcResult<T> =
@@ -64,7 +62,6 @@ export const IPC = {
   getSnapshot: 'session:snapshot',
   listSources: 'capture:list-sources',
   setSource: 'capture:set-source',
-  copyToClipboard: 'session:copy-to-clipboard',
   setFloating: 'window:set-floating',
   sendMedia: 'media:send',
   // main -> renderer
@@ -84,13 +81,6 @@ export interface ErrosApi {
   listSources(): Promise<CaptureSource[]>;
   /** tell the main process which source the next getDisplayMedia() should use */
   setCaptureSource(id: string): Promise<IpcResult<null>>;
-  /**
-   * Copy text to the OS clipboard via Electron's native `clipboard` module,
-   * not the web Clipboard API - the renderer's permission handler
-   * (src/main/index.ts) only grants `media`/`display-capture`, so
-   * `navigator.clipboard.writeText()` would silently fail here.
-   */
-  copyToClipboard(text: string): Promise<IpcResult<null>>;
   /**
    * Shrink the app's own window into a small, resizable, always-on-top
    * widget (floating=true) or restore it to its normal size (false). Used

@@ -23,7 +23,6 @@ export const hostRoomRequestSchema = z.object({
 export const joinRoomRequestSchema = z.object({
   nickname: z.string().trim().min(1).max(48),
   password: z.string().min(1).max(256),
-  code: z.string().min(8).max(256),
 });
 
 /** Media bodies the renderer may send inbound (and echo of what it receives). */

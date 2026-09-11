@@ -3,10 +3,10 @@
 
 | | |
 |---|---|
-| **Versão** | 0.4 — Fases 0-3 (mídia) concluídas; sinalização migrada para o relé hospedado |
+| **Versão** | 0.5 — Fases 0-3 (mídia) concluídas; sinalização migrada para o relé hospedado; sala única (sem código) |
 | **Alvo** | Windows 11 x64 |
 | **Stack** | Electron + WebRTC (Chromium) + WebRTC nativo em Node (werift) + relé Node hospedado (`server/`) |
-| **Escala** | até 12 participantes por sala |
+| **Escala** | até 12 participantes, numa única sala |
 | **Status** | plano de controle sobre o relé + mídia P2P funcionando e testados; failover automático **parcado** (ver §18) |
 
 > Documentação e UI em pt-BR. Código, identificadores, campos de protocolo e comentários em inglês.
@@ -18,6 +18,14 @@
 > uma porta no roteador era o maior ponto de atrito do produto. A **mídia**
 > continua P2P via ICE/STUN, sem relé. Ver §18 para a arquitetura completa e o
 > porquê.
+>
+> **v0.5 é outro desvio, também por pedido explícito do usuário: em vez de N
+> salas concorrentes, cada uma com seu próprio código, o app agora suporta
+> exatamente uma sala.** `roomId` e `codeSalt` (§5) deixaram de ser sorteados
+> por sessão e viraram constantes fixas embutidas no app — host e quem entra
+> chegam à mesma identidade de sala sem trocar nenhum código, só a senha
+> combinada precisa bater. Ver §5 para o detalhe e o trade-off de segurança
+> que essa troca assume conscientemente.
 
 ---
 
@@ -30,7 +38,7 @@ Consequência: o failover automático de host (Fase 2) foi PARCADO (código
 mantido em `parked/`, fora do build) porque o modelo de relé v1 não tem
 reconexão do host; ver §18.5.**
 
-**O que já existe e passa nos testes** (`npm test` → 167 testes, 21 arquivos;
+**O que já existe e passa nos testes** (`npm test` → 155 testes, 19 arquivos;
 `npm run typecheck` limpo — Node + web + `server/`; `npm audit` → 0
 vulnerabilidades em ambos os `package.json`):
 
@@ -39,7 +47,7 @@ vulnerabilidades em ambos os `package.json`):
 | Cripto | `src/main/crypto/{lv,kdf,cpace,aead}.ts` | CPace ristretto255/SHA-512 **verificado contra o vetor de teste do CFRG**; Argon2id 64 MiB; AES-256-GCM. Roda ponta a ponta através do relé sem mudança nenhuma. |
 | Frames | `src/main/net/{connection,frame-codec}.ts` | enquadramento autenticado, contador anti-replay, fila para corrida texto→binário |
 | Transporte | `src/main/net/{transport,ws-source,relay-link,relay-wire}.ts` | `Connection` roda sobre um `Transport` abstrato (§18.2): `WsTransport`+`WsConnectionSource` (WS local, só testes) ou `RelayHostLink`/`RelayPeerLink` (produção, via `server/`) |
-| Código de sala | `src/main/room/{base32,ip,room-code}.ts` | Base32 Crockford + CRC-16; **v2** carrega só `roomId`+`codeSalt` (§5, §18.4) — nenhum IP/porta |
+| Identidade da sala | `src/main/app/room-session.ts` (`FIXED_ROOM_ID`/`FIXED_CODE_SALT`) | sala única, fixa - sem código (§5, §18.4). `src/main/room/{base32,room-code}.ts` (codec do código v2) foram removidos na v0.5, não existem mais |
 | Relé (hospedado) | `server/src/{index,relay,wire}.ts` | multiplexador WS que só encaminha bytes opacos; deploy Render (`server/render.yaml`); ver §18 |
 | Sinalização | `src/main/signaling/{server,client,handshake,roster,rate-limit,heartbeat}.ts` | `SignalingServer` (host) + `SignalingClient` (peer), agora sobre um `Transport`/`ConnectionSource` injetado em vez de abrir o próprio socket; admissão por senha; rate limit por IP; heartbeat ping/pong |
 | Protocolo | `src/shared/protocol.ts` | todas as mensagens em `zod`; `epoch` no envelope e no `joined` |
@@ -219,9 +227,11 @@ src/
       relay-config.ts       resolve ERROS_RELAY_URL (§18.4)
       stun.ts               cliente STUN hand-rolled - só mídia agora
       local-ip.ts           IP LAN primário - só mídia agora
-    room/
-      base32.ts ip.ts       Base32 Crockford, IPv4/IPv6
-      room-code.ts          encode/decode do código v2: roomId+codeSalt (§5, §18.4)
+    # room/ existiu até a v0.5 (base32.ts, ip.ts, room-code.ts - codec do
+    # código de sala v2 + o parsing de IP que sobrava do v1, pré-relé); todo o
+    # diretório foi removido junto com o conceito de código de sala (§5) -
+    # a identidade da sala agora é FIXED_ROOM_ID/FIXED_CODE_SALT em
+    # app/room-session.ts, sem nada pra codificar ou decodificar
     signaling/
       handshake.ts          conduz o CPace nos dois papéis
       server.ts             SignalingServer (host) - roda sobre um ConnectionSource
@@ -301,37 +311,41 @@ stateDiagram-v2
 
 ---
 
-## 5. Formato do código de sala
+## 5. Identidade da sala: fixa, sem código (v0.5)
 
-**v2 (desde o pivô do relé, §18.4).** Antes da v0.4 o código carregava onde
-estava o host (`address`+`port`) porque quem entrava discava direto nele. Com
-a sinalização hospedada, todo cliente disca o mesmo `relayUrl` (§18.4) — o
-código só precisa dizer **qual** sala, ao relé. Segue sem carregar segredo
-nenhum.
+**Antes (v0.4, ainda no histórico do git):** cada `host()` sorteava um
+`roomId` (4 bytes) + `codeSalt` (6 bytes) novos, e os codificava num código
+Base32 de 21 caracteres (`K7QM4X2-A9BTR0F-DW6HJE3`) que o host compartilhava
+por fora (WhatsApp etc.) e quem entrava colava de volta. Isso permitia N
+salas concorrentes no mesmo relé, cada uma com seu próprio código.
 
-```
-byte 0       version                 (u8 = 2)
-bytes 1-4    roomId                  (4 bytes aleatorios - chave de sala no rele)
-bytes 5-10   codeSalt                (6 bytes aleatorios)
-ultimos 2    crc16                   (CCITT, sobre tudo acima)
-```
+**Agora:** por pedido explícito do usuário, o app suporta **exatamente uma
+sala**. Não existe mais código nenhum para gerar, compartilhar ou digitar —
+`FIXED_ROOM_ID` e `FIXED_CODE_SALT` (`src/main/app/room-session.ts`) são
+constantes fixas, iguais em toda instalação do app, e tanto `host()` quanto
+`join()` usam as mesmas duas. Quem hospeda e quem entra chegam à mesma
+`roomId` (chave de roteamento no relé) e ao mesmo `argonSalt` derivado sem
+troca nenhuma; a única coisa que ainda precisa bater é a senha.
 
-Corpo de 11 bytes + 2 de CRC = **13 bytes → 21 caracteres** em Base32 Crockford
-(maiúsculas, sem `I/L/O/U`), exibidos em 3 grupos de 7:
+Isso reaproveita, sem mudar uma linha do relé, a rejeição que já existia
+(`server/src/relay.ts`, `#hostHello`): um segundo `host()` enquanto a sala
+está ativa recebe `room_exists`, exatamente como antes uma colisão de
+`roomId` aleatório receberia o mesmo erro. **"Sala única" é uma propriedade
+do cliente (constantes fixas), não uma trava nova no servidor.**
 
-```
-K7QM4X2-A9BTR0F-DW6HJE3
-```
+`codeSalt` (§6, `deriveArgonSalt`) existia para que a mesma senha em salas
+*diferentes* não hash-asse para a mesma chave. Com sala única essa
+preocupação deixa de existir por construção — não há uma segunda sala com a
+qual colidir. O que sobra é um trade-off consciente, aceito pelo usuário: o
+salt do Argon2id deixou de ser sorteado por sessão e é o mesmo em toda
+instalação deste app, então uma rainbow table computada contra ele
+funcionaria contra qualquer instalação. Argon2id continua caro (64 MiB,
+t=3) e a senha continua sendo o único segredo — um trade aceitável para uma
+ferramenta privada de grupo pequeno, não um serviço multi-tenant público.
 
-Entrada tolerante: normaliza minúsculas, aceita/ignora hífens e espaços, mapeia `I→1 L→1 O→0`, valida CRC-16 antes de qualquer tentativa de rede (erro de digitação é detectado localmente). Um código v1 (20 ou 32 bytes) é rejeitado pelo tamanho antes mesmo de checar a versão — mensagem clara de "versão não suportada" em vez de um erro de rede confuso.
-
-**Propriedade importante, inalterada:** o código pode ser compartilhado por qualquer canal inseguro. Ele não é secreto e sua integridade não é crítica — quem interceptar ou alterar o código não consegue nada, porque o PAKE (§6) impede que um host falso se autentique, e o relé (§18) não autentica ninguém, só limita taxa por IP. A senha é o único segredo, e ela nunca trafega. Isso é o que permite mandar o código no WhatsApp sem cerimônia.
-
-`codeSalt` existe para que a mesma senha em salas diferentes produza chaves diferentes. Como o Argon2id quer salt de 16 bytes e não vamos inflar o código, o salt real é `HKDF-Expand(roomId ‖ codeSalt, "erros-share/argon-salt/v1", 16)` — 80 bits de unicidade, suficiente porque o salt não é secreto e o ataque de dicionário aqui é *online-only* (§6).
-
-`roomId` (4 bytes = 32 bits) também é a chave que o relé usa para rotear (`server/src/relay.ts`, um `Map<roomId, Room>`); com o limite de `maxRooms` do relé (§18) na casa das centenas, a chance de colisão é desprezível, e uma colisão só produz um erro `room_exists` ao criar (o usuário tenta de novo, gera outro `roomId`) — não é uma falha de segurança.
-
-Como não há mais failover automático (§18.5), o código de uma sala em andamento não muda mais sozinho; ele só para de funcionar quando a sala termina (o host saiu, ou o link dele com o relé caiu).
+Como não há mais failover automático (§18.5) nem código para expirar, a sala
+só para de existir quando o host sai ou o link dele com o relé cai — quem
+quiser hospedar de novo depois disso reabre a mesma identidade fixa.
 
 ---
 
@@ -738,7 +752,7 @@ Nenhuma dependência de serviço em nuvem. STUN público é configurável e subs
 ## 13. Plano de testes
 
 **Unitários / puros (vitest):**
-- codec do código de sala: round-trip, IPv4/IPv6, CRC, normalização de digitação (`O→0`, `l→1`), rejeição de versão desconhecida.
+- ~~codec do código de sala: round-trip, IPv4/IPv6, CRC, normalização de digitação~~ - obsoleto desde a v0.5 (sala única, identidade fixa, sem código nem codec; §5).
 - KDF: vetores fixos para `w`, `ISK`, `k_c2s`, `k_s2c`, `roomMediaKey` — garante que dois builds derivam a mesma chave e detecta mudança acidental de domínio de separação.
 - CPace: vetores do draft do CFRG; propriedade "senhas diferentes ⇒ confirmação falha"; rejeição de ponto de identidade e de codificação inválida.
 - AEAD: nonce nunca reutilizado; frame reordenado/repetido é rejeitado; AAD alterado falha.
@@ -1010,7 +1024,7 @@ cai, `onClose` já derruba a sala na hora (`HOST_GONE` + delete). Simples,
 honesto, e é exatamente a peça que teria que mudar para reviver o failover
 (§18.5).
 
-### 18.4 Cold start, keep-alive, config, e o código de sala
+### 18.4 Cold start, keep-alive, config, e a identidade da sala
 
 **Cold start.** Render free tier dorme após ~15 min sem tráfego e leva 30-50 s
 para acordar. `openWithRetry()` (`relay-link.ts`) tenta `RelayHostLink.open`/
@@ -1042,8 +1056,9 @@ Fase 3) é onde isso deveria virar uma preferência editável pelo usuário, em
 vez de env var/constante fixa - útil sobretudo pra quem quiser apontar para
 um relé próprio.
 
-**Código de sala v2.** Já coberto no §5: só `roomId`+`codeSalt`, porque o
-endereço agora é sempre o mesmo `relayUrl` para todo mundo.
+**Identidade da sala.** Já coberto no §5: `roomId`+`codeSalt` viraram
+constantes fixas na v0.5 (sala única, sem código), porque o endereço já era
+sempre o mesmo `relayUrl` para todo mundo desde o pivô do relé.
 
 ### 18.5 O que falta para reviver o failover automático
 

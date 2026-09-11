@@ -11,7 +11,6 @@ const IDLE: SessionSnapshot = {
   selfPeerId: '',
   nickname: '',
   epoch: 0,
-  code: null,
   roster: [],
   streams: [],
   maxRecommendedSubscriptions: 2,
@@ -156,12 +155,11 @@ function FloatingVideo({
 function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
   const [nickname, setNickname] = useState('');
   const [password, setPassword] = useState('');
-  const [code, setCode] = useState('');
   const [busy, setBusy] = useState<null | 'host' | 'join'>(null);
   const [error, setError] = useState<string | null>(null);
 
   const connecting = phase === 'connecting' || phase === 'waking';
-  const working = busy !== null || connecting;
+  const disabled = busy !== null || connecting || !nickname.trim() || !password;
 
   const host = async () => {
     setError(null);
@@ -173,7 +171,7 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
   const join = async () => {
     setError(null);
     setBusy('join');
-    const res = await window.erros.joinRoom({ nickname, password, code });
+    const res = await window.erros.joinRoom({ nickname, password });
     if (!res.ok) setError(res.error);
     setBusy(null);
   };
@@ -185,6 +183,13 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
     void window.erros.leaveRoom();
     setBusy(null);
   };
+
+  const spinner = (
+    <>
+      <span className="spinner" />
+      {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
+    </>
+  );
 
   return (
     <>
@@ -199,78 +204,28 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
             onChange={(e) => setNickname(e.target.value)}
           />
         </div>
-      </div>
-
-      <div className="card">
-        <h2>Criar uma sala</h2>
+        <div className="field">
+          <label htmlFor="pw">Senha da sala</label>
+          <input
+            id="pw"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </div>
         <p className="muted" style={{ marginTop: 0 }}>
-          Seu PC coordena a sessão. Você recebe um código para compartilhar.
+          Sala única, sem código: quem sabe a senha combinada com o grupo
+          entra direto. Se ninguém estiver hospedando ainda, hospede você.
         </p>
-        <div className="field">
-          <label htmlFor="pw-host">Senha da sala</label>
-          <input
-            id="pw-host"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </div>
-        <button
-          className="primary"
-          disabled={working || !nickname.trim() || !password}
-          onClick={host}
-        >
-          {busy === 'host' || (connecting && busy === null) ? (
-            <>
-              <span className="spinner" />
-              {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
-            </>
-          ) : (
-            'Criar sala'
-          )}
-        </button>
-        {busy === 'host' && connecting && (
-          <button className="ghost" style={{ marginTop: 8 }} onClick={cancel}>
-            Cancelar
+        <div className="row">
+          <button className="primary" disabled={disabled} onClick={host}>
+            {busy === 'host' || (connecting && busy === null) ? spinner : 'Hospedar sala'}
           </button>
-        )}
-      </div>
-
-      <div className="card">
-        <h2>Entrar numa sala</h2>
-        <div className="field">
-          <label htmlFor="code">Código da sala</label>
-          <input
-            id="code"
-            value={code}
-            placeholder="K7QM4X2-A9BTR0F-DW6HJE3"
-            onChange={(e) => setCode(e.target.value)}
-          />
+          <button className="primary" disabled={disabled} onClick={join}>
+            {busy === 'join' || (connecting && busy === null) ? spinner : 'Entrar na sala'}
+          </button>
         </div>
-        <div className="field">
-          <label htmlFor="pw-join">Senha da sala</label>
-          <input
-            id="pw-join"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </div>
-        <button
-          className="primary"
-          disabled={working || !nickname.trim() || !password || !code.trim()}
-          onClick={join}
-        >
-          {busy === 'join' || (connecting && busy === null) ? (
-            <>
-              <span className="spinner" />
-              {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
-            </>
-          ) : (
-            'Entrar'
-          )}
-        </button>
-        {busy === 'join' && connecting && (
+        {busy !== null && connecting && (
           <button className="ghost" style={{ marginTop: 8 }} onClick={cancel}>
             Cancelar
           </button>
@@ -291,21 +246,6 @@ function Room({
   media: MediaEngine;
   onFloat: (streamId: string) => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<number | undefined>(undefined);
-
-  const copy = useCallback(async () => {
-    if (!snap.code) return;
-    // Electron's native clipboard via IPC, not navigator.clipboard - the
-    // renderer's permission handler only grants media/display-capture, so
-    // the web Clipboard API rejects here and this used to silently "succeed".
-    const res = await window.erros.copyToClipboard(snap.code);
-    if (!res.ok) return;
-    setCopied(true);
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(false), 1500);
-  }, [snap.code]);
-
   const leave = () => void window.erros.leaveRoom();
 
   return (
@@ -319,16 +259,6 @@ function Room({
           Sair
         </button>
       </div>
-
-      {snap.code && (
-        <div className="card">
-          <label>Código para compartilhar</label>
-          <div className="code-box">
-            <span>{snap.code}</span>
-            <button onClick={copy}>{copied ? 'Copiado' : 'Copiar'}</button>
-          </div>
-        </div>
-      )}
 
       {media.watching > snap.maxRecommendedSubscriptions && (
         <div className="notice">

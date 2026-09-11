@@ -8,8 +8,10 @@ executável roda em todos os PCs; quem cria a sala vira o coordenador (host) da
 - **Ninguém precisa abrir porta no roteador.** A sinalização (quem entrou, senha,
   roster) passa por um relé hospedado gratuito; a mídia continua P2P direta via
   hole punching ICE.
-- Entrada por **código da sala + senha**. A senha nunca trafega (PAKE CPace) —
-  nem para o relé, que só encaminha bytes cifrados que ele não consegue ler.
+- **Sala única, sem código**: o app suporta exatamente uma sala. Entrada é só
+  **apelido + senha combinada com o grupo** — quem clicar em hospedar primeiro
+  vira o host. A senha nunca trafega (PAKE CPace) — nem para o relé, que só
+  encaminha bytes cifrados que ele não consegue ler.
 
 > Estado atual: **Fases 0-3 concluídas** (sinalização, sessão e mídia
 > funcionando; failover automático de host está **parcado**, ver abaixo). Veja
@@ -87,7 +89,7 @@ A confiança é *no grupo*; o host é um membro do grupo, não um terceiro; e o
 |---|---|---|
 | ISP / rede no caminho | ver que há tráfego, volume, horários | ler a sinalização ou a mídia |
 | O relé de sinalização | ver `roomId`, quantidade de conexões, IPs (rate limit) | ler qualquer conteúdo — CPace e os frames continuam cifrados ponta a ponta através dele |
-| Alguém com o código, sem a senha | tentar entrar e ser bloqueado por rate limit (host e relé) | entrar, ver o roster, ver mídia, **ou atacar a senha offline** |
+| Qualquer um com o app, sem a senha (a sala é única, não há código a proteger) | tentar entrar e ser bloqueado por rate limit (host e relé) | entrar, ver o roster, ver mídia, **ou atacar a senha offline** |
 | Alguém tentando se passar pelo host | fazer você conectar nele | passar o handshake — a conexão morre antes de qualquer dado |
 | Participante autorizado | assistir qualquer transmissão, ver nicknames e IPs externos dos demais | forjar mensagens de host |
 | O host | **ver e ouvir toda a mídia em claro** (v1) | ler a senha (ela nunca trafega, nem para o relé) |
@@ -119,9 +121,8 @@ Estrutura em `src/`:
 | `src/shared/` | contrato de protocolo (`zod`) e de IPC |
 | `src/main/crypto/` | CPace (PAKE), Argon2id/HKDF, AES-256-GCM |
 | `src/main/net/` | frames autenticados, `Transport`/`ConnectionSource`, cliente do relé (`relay-link.ts`), STUN (mídia) |
-| `src/main/room/` | código da sala v2 (Base32 Crockford + CRC-16 sobre `roomId`+`codeSalt`) |
 | `src/main/signaling/` | `SignalingServer` (host) e `SignalingClient` (peer), rodando sobre um `Transport`/`ConnectionSource` injetado |
-| `src/main/app/` | `RoomSession` (host = relé+server; peer = relé+client), IPC, captura de tela |
+| `src/main/app/` | `RoomSession` (host = relé+server; peer = relé+client; sala única, identidade fixa - ver `docs/DESIGN.md` §5), IPC, captura de tela |
 | `src/main/sfu/` | mini-SFU werift: `router`, `codecs`, `media-plane`, `governor` |
 | `src/main/index.ts` | entry do processo principal do Electron |
 | `src/preload/` | ponte `contextBridge` → `window.erros` |
@@ -200,6 +201,12 @@ informações" → "Executar assim mesmo".
         vendoriza arquivos de um jeito que quebra dentro do asar
         (`scripts/patch-binary-data.mjs` corrige depois de todo `npm install`).
   - [ ] Assinatura de código (custa dinheiro, não incluído).
+- [x] **v0.5** — Sala única, sem código ([docs/DESIGN.md §5](docs/DESIGN.md)).
+  Por pedido explícito do usuário: em vez de N salas concorrentes, cada uma
+  com seu próprio código gerado na hora, o app agora suporta exatamente uma.
+  `roomId`+`codeSalt` viraram constantes fixas embutidas no app em vez de
+  sorteadas por sessão; `src/main/room/{base32,ip,room-code}.ts` (o codec do
+  código v2) foi removido inteiramente. Entrada agora é só apelido + senha.
 
 ---
 

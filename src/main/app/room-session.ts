@@ -2,8 +2,14 @@
  * One live room membership, from the main process's point of view. Wraps the
  * two roles behind one interface the IPC layer can drive:
  *
- *   - host: a SignalingServer fed by a RelayHostLink + the room code
+ *   - host: a SignalingServer fed by a RelayHostLink
  *   - peer: a SignalingClient over a RelayPeerLink
+ *
+ * This build supports exactly one room (by user request) - there is no room
+ * code to generate, share, or type in. FIXED_ROOM_ID/FIXED_CODE_SALT below are
+ * the same for every host and every joiner, so the two sides arrive at an
+ * identical relay routing key and Argon2 salt with no exchange at all; the
+ * only thing that still has to match between host and peer is the password.
  *
  * Signaling always goes through the hosted relay (docs/DESIGN.md section 2.2 /
  * 18) - nobody opens an inbound port for the control plane any more. The relay
@@ -15,7 +21,6 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { randomBytes } from 'node:crypto';
 import {
   type ArgonParams,
   deriveArgonSalt,
@@ -28,7 +33,6 @@ import {
   openWithRetry,
 } from '../net/relay-link.js';
 import { relayUrl as resolveRelayUrl } from '../net/relay-config.js';
-import { decodeRoomCode, encodeRoomCode, roomIdHex } from '../room/room-code.js';
 import { primaryLanIpv4 } from '../net/local-ip.js';
 import { defaultIceServers } from '../net/stun.js';
 import { SignalingServer } from '../signaling/server.js';
@@ -57,6 +61,26 @@ const DEFAULT_ROOM_PARAMS: RoomParams = {
 const WAKING_NOTICE =
   'Acordando o servidor de sinalização (pode levar até 1 minuto)…';
 
+// This app supports exactly one room. roomId is the relay's routing key
+// (server/src/relay.ts keys its Map<roomId, Room> by this), and codeSalt
+// domain-separates the Argon2 salt (crypto/kdf.ts's deriveArgonSalt) so the
+// same password doesn't hash to the same key across DIFFERENT rooms - a
+// concern that no longer applies by construction, since there's only ever
+// one. Both are fixed, arbitrary constants rather than random per-session
+// values so a joining peer can arrive at them with no exchange whatsoever;
+// the only thing that still needs to match between host and peer is the
+// password itself.
+//
+// Trade-off worth stating plainly: every installation of this exact app
+// build now shares the same Argon2 salt, so a rainbow table computed against
+// it would work against any of them - previously each hosting session got a
+// fresh random salt. Argon2id is still deliberately slow/memory-hard and the
+// password is still the only real secret, so this is an acceptable trade for
+// a small private-group tool, not a public multi-tenant service.
+const FIXED_ROOM_ID = new Uint8Array([0x65, 0x72, 0x72, 0x31]);
+const FIXED_CODE_SALT = new Uint8Array([0x73, 0x68, 0x61, 0x72, 0x65, 0x31]);
+const FIXED_ROOM_ID_HEX = Buffer.from(FIXED_ROOM_ID).toString('hex');
+
 export interface RoomSessionEvents {
   update: [SessionSnapshot];
   /** a media negotiation body destined for this participant's renderer */
@@ -75,14 +99,12 @@ export interface HostOptions {
 export interface JoinOptions {
   readonly nickname: string;
   readonly password: string;
-  readonly code: string;
   readonly relayUrl?: string;
 }
 
 export class RoomSession extends EventEmitter<RoomSessionEvents> {
   #phase: SessionPhase = 'idle';
   #nickname = '';
-  #code: string | null = null;
   #notice: string | null = null;
 
   #w: Uint8Array | null = null;
@@ -131,19 +153,16 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     this.#phase = 'connecting';
     this.#emit();
 
-    const roomId = new Uint8Array(randomBytes(4));
-    const codeSalt = new Uint8Array(randomBytes(6));
-    const argonSalt = deriveArgonSalt(roomId, codeSalt);
+    const argonSalt = deriveArgonSalt(FIXED_ROOM_ID, FIXED_CODE_SALT);
     this.#w = derivePasswordKey(opts.password, argonSalt, opts.argonParams);
     wipe(argonSalt);
 
     const roomParams = opts.roomParams ?? DEFAULT_ROOM_PARAMS;
     this.#roomParams = roomParams;
-    this.#code = encodeRoomCode({ version: 2, roomId, codeSalt });
 
     const url = resolveRelayUrl(opts.relayUrl);
     const link = await openWithRetry(
-      () => RelayHostLink.open(url, roomIdHex(roomId), APP_VERSION),
+      () => RelayHostLink.open(url, FIXED_ROOM_ID_HEX, APP_VERSION),
       { onWaking: () => this.#setWaking() },
     );
     if (this.#leaving) {
@@ -152,7 +171,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     }
     this.#hostLink = link;
 
-    await this.#startServer(roomId, roomParams, opts.argonParams);
+    await this.#startServer(FIXED_ROOM_ID, roomParams, opts.argonParams);
     if (this.#leaving) {
       await this.#server?.close().catch(() => {});
       return;
@@ -168,10 +187,9 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     this.#phase = 'connecting';
     this.#emit();
 
-    const decoded = decodeRoomCode(opts.code);
     const url = resolveRelayUrl(opts.relayUrl);
     const link = await openWithRetry(
-      () => RelayPeerLink.open(url, roomIdHex(decoded.roomId), APP_VERSION),
+      () => RelayPeerLink.open(url, FIXED_ROOM_ID_HEX, APP_VERSION),
       { onWaking: () => this.#setWaking() },
     );
     if (this.#leaving) {
@@ -180,10 +198,10 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     }
 
     const client = new SignalingClient({
-      roomId: decoded.roomId,
+      roomId: FIXED_ROOM_ID,
       // derived lazily against the host's own argonParams (from hello_ack),
       // not assumed up front - see docs/DESIGN.md section 0, deviation 7.
-      secret: { password: opts.password, codeSalt: decoded.codeSalt },
+      secret: { password: opts.password, codeSalt: FIXED_CODE_SALT },
       nickname: opts.nickname,
       transport: link,
     });
@@ -236,7 +254,6 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
         : (this.#client?.peerId ?? ''),
       nickname: this.#nickname,
       epoch: isHost ? (this.#server?.epoch ?? 0) : (this.#client?.epoch ?? 0),
-      code: this.#code,
       roster: isHost ? (this.#server?.roster ?? []) : (this.#client?.roster ?? []),
       streams: this.streams,
       maxRecommendedSubscriptions: this.#roomParams.maxRecommendedSubscriptions,

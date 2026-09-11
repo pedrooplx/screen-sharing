@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import {
+  DEFAULT_STUN_SERVERS,
   MAGIC_COOKIE,
   StunError,
   decodeMappedAddress,
+  defaultIceServers,
   encodeBindingRequest,
   isCarrierGradeNat,
 } from '../../src/main/net/stun.js';
@@ -76,6 +78,16 @@ describe('STUN mapped-address decoding', () => {
   it('rejects a non-success message type', () => {
     const res = buildResponse({ ip: [1, 2, 3, 4], port: 1, xored: true, type: 0x0111 });
     expect(() => decodeMappedAddress(res, tid)).toThrow(StunError);
+  });
+});
+
+describe('defaultIceServers', () => {
+  it('renders every default STUN server as a stun: url', () => {
+    const servers = defaultIceServers();
+    expect(servers).toHaveLength(DEFAULT_STUN_SERVERS.length);
+    for (const [i, s] of DEFAULT_STUN_SERVERS.entries()) {
+      expect(servers[i]).toEqual({ urls: `stun:${s.host}:${s.port}` });
+    }
   });
 });
 

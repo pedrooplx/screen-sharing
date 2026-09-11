@@ -65,8 +65,8 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
   const [busy, setBusy] = useState<null | 'host' | 'join'>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const working =
-    busy !== null || phase === 'connecting' || phase === 'waking';
+  const connecting = phase === 'connecting' || phase === 'waking';
+  const working = busy !== null || connecting;
 
   const host = async () => {
     setError(null);
@@ -80,6 +80,14 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
     setBusy('join');
     const res = await window.erros.joinRoom({ nickname, password, code });
     if (!res.ok) setError(res.error);
+    setBusy(null);
+  };
+  // a cold-start retry can take up to ~75 s (docs/DESIGN.md §18.4) - let the
+  // user back out instead of staring at a frozen button the whole time.
+  // RoomSession.leave() mid-connect closes whatever was just opened instead
+  // of leaving it dangling, so this is always safe to fire.
+  const cancel = () => {
+    void window.erros.leaveRoom();
     setBusy(null);
   };
 
@@ -117,7 +125,7 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
           disabled={working || !nickname.trim() || !password}
           onClick={host}
         >
-          {busy === 'host' || phase === 'connecting' || phase === 'waking' ? (
+          {busy === 'host' || (connecting && busy === null) ? (
             <>
               <span className="spinner" />
               {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
@@ -126,6 +134,11 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
             'Criar sala'
           )}
         </button>
+        {busy === 'host' && connecting && (
+          <button className="ghost" style={{ marginTop: 8 }} onClick={cancel}>
+            Cancelar
+          </button>
+        )}
       </div>
 
       <div className="card">
@@ -153,7 +166,7 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
           disabled={working || !nickname.trim() || !password || !code.trim()}
           onClick={join}
         >
-          {busy === 'join' || phase === 'connecting' || phase === 'waking' ? (
+          {busy === 'join' || (connecting && busy === null) ? (
             <>
               <span className="spinner" />
               {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
@@ -162,6 +175,11 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
             'Entrar'
           )}
         </button>
+        {busy === 'join' && connecting && (
+          <button className="ghost" style={{ marginTop: 8 }} onClick={cancel}>
+            Cancelar
+          </button>
+        )}
       </div>
 
       {error && <div className="error">{error}</div>}

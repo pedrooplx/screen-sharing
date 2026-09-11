@@ -165,11 +165,13 @@ Para mexer só na UI sem Electron: `npx vite src/renderer` e abra `http://localh
         (`RelayHostLink`/`RelayPeerLink`).
   - [x] Código de sala v2 (só `roomId`+`codeSalt`, sem IP/porta).
   - [x] Retry com backoff para o cold start do relé free-tier + keep-alive
-        enquanto a sala está ativa.
+        enquanto a sala está ativa; botão **Cancelar** no Lobby durante isso.
+  - [x] SFU do host com STUN público por padrão (`defaultIceServers()`) — a
+        mídia também descobre seu endereço de saída sem porta de entrada.
   - [x] Failover automático **parcado** (dependia de reconexão de host, que o
         relé v1 não oferece).
 - [ ] **Fase 4** — Empacotamento (electron-builder), URL de relé de produção
-      real, e robustez.
+      real (falta o deploy — próximo passo), e robustez.
 
 ---
 

@@ -1060,22 +1060,25 @@ lista.
 
 ### 18.6 Pendências conhecidas deste pivô
 
-- **URL do relé de produção**: hoje é um placeholder (§18.4). Precisa do
-  deploy real no Render (ou onde o usuário decidir) antes do primeiro build
-  distribuído.
-- **`iceServers` da mídia**: o SFU-peer deveria ganhar uma lista de STUN
-  pública default explícita (hoje herda o que já existia da Fase 3) e
-  confirmar que funciona conectando **de saída apenas** - nenhum teste de
-  campo real foi refeito depois do pivô (era pendência já antes, §17.3 item
-  7).
+- **URL do relé de produção**: hoje é um placeholder
+  (`DEFAULT_RELAY_URL` em `relay-config.ts`, §18.4). Isto é a única peça que
+  só o deploy real resolve - depende da conta do usuário no Render (ou onde
+  ele decidir hospedar). Depois do deploy, trocar essa constante (ou setar
+  `ERROS_RELAY_URL`) é o passo final.
+- ✅ **`iceServers` da mídia**: `RoomSession.#startServer` agora passa
+  `defaultIceServers()` (`src/main/net/stun.ts`, os mesmos STUN públicos do
+  `DEFAULT_STUN_SERVERS`) para o `SfuMediaPlane`/`SfuRouter` do host. Isso é o
+  que faz o SFU descobrir seu próprio candidato `srflx` com um pacote UDP de
+  saída - a mesma propriedade que o pivô do relé já deu ao plano de controle,
+  agora também na mídia. **Ainda falta**: um teste de campo real entre
+  máquinas de casas diferentes pra confirmar na prática (§17.3 item 7) - só
+  testável manualmente.
 - **`src/main/config/` (settings.json)**: ainda não existe; é onde
   `ERROS_RELAY_URL` deveria virar uma preferência editável em vez de env var.
-- **Sem botão de cancelar durante `connecting`/`waking`.** `RoomSession` já é
-  seguro para isso (`leave()` chamado nesse meio-tempo fecha o link recém
-  aberto em vez de vazar - `test/app/room-session.test.ts`, "does not leave a
-  dangling host link if leave() races the initial connect"), mas a UI
-  (`App.tsx`) desabilita os botões de Criar/Entrar enquanto a conexão está em
-  andamento e não oferece um jeito de desistir de um cold-start de até ~75 s.
-  Vale um botão "Cancelar" no Lobby quando `phase` for `connecting`/`waking`.
+- ✅ **Botão de cancelar durante `connecting`/`waking`.** O Lobby
+  (`App.tsx`) mostra "Cancelar" sob o botão que está em andamento assim que
+  `phase` vira `connecting`/`waking`; ele chama `leaveRoom()`, que aciona o
+  mesmo `#leaving` guard do `RoomSession` (§18.4) - fecha o link recém-aberto
+  em vez de deixar a sessão presa esperando um cold-start de até ~75 s.
 - Ver §18.5 para o failover.
 - Sem simulcast na v1: um assinante com internet ruim degrada a qualidade para todos os assinantes daquele fluxo.

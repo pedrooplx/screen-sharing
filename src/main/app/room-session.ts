@@ -30,6 +30,7 @@ import {
 import { relayUrl as resolveRelayUrl } from '../net/relay-config.js';
 import { decodeRoomCode, encodeRoomCode, roomIdHex } from '../room/room-code.js';
 import { primaryLanIpv4 } from '../net/local-ip.js';
+import { defaultIceServers } from '../net/stun.js';
 import { SignalingServer } from '../signaling/server.js';
 import { SignalingClient } from '../signaling/client.js';
 import { SfuMediaPlane } from '../sfu/media-plane.js';
@@ -247,6 +248,11 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     const lanIp = primaryLanIpv4();
     const media = new SfuMediaPlane({
       videoBitrateKbps: roomParams.videoBitrateKbps,
+      // public STUN by default (docs/DESIGN.md 8.3/18.6): this is what lets
+      // the SFU discover its own reflexive address with one outbound UDP
+      // packet, so media hole-punches without an inbound port on the host -
+      // the same property the relay pivot already gave the control plane.
+      iceServers: defaultIceServers(),
       ...(lanIp ? { announceIp: lanIp } : {}),
     });
     this.#media = media;

@@ -209,6 +209,19 @@ export async function discoverExternalAddress(
   throw lastError;
 }
 
+/**
+ * The same public STUN servers, shaped for a WebRTC `RTCPeerConnection`'s
+ * `iceServers` (docs/DESIGN.md section 8.3 / 18.6) - this is what lets the
+ * host's SFU (and any peer) discover its `srflx` candidate with one outbound
+ * UDP packet, so media hole-punches without anyone opening an inbound port.
+ * Untyped as `{ urls: string }[]` (not werift's `RTCIceServer`) so this module
+ * stays dependency-free; callers that need the werift type get a structurally
+ * compatible value.
+ */
+export function defaultIceServers(): { urls: string }[] {
+  return DEFAULT_STUN_SERVERS.map((s) => ({ urls: `stun:${s.host}:${s.port}` }));
+}
+
 /** RFC 6598 CGNAT range (100.64.0.0/10) - a host here cannot accept inbound. */
 export function isCarrierGradeNat(ipv4: string): boolean {
   const parts = ipv4.split('.').map(Number);

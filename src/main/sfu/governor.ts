@@ -17,12 +17,19 @@ export interface QualityLevel {
   readonly scaleDownBy: number;
 }
 
-/** Descending quality. Index 0 is full quality. */
+/**
+ * Descending quality. Index 0 is full quality - `baseKbps` (room's
+ * `videoBitrateKbps`) is calibrated to *this* top rung, so raising it (1080p30
+ * -> 1080p60) means the room default bitrate needs to go up too
+ * (RoomSession's DEFAULT_ROOM_PARAMS) or the "100%" step just asks for a
+ * bitrate that was never enough for 60fps in the first place.
+ */
 export const QUALITY_LADDER: readonly QualityLevel[] = [
-  { label: '1080p30', kbpsFactor: 1.0, maxFps: 30, scaleDownBy: 1 },
-  { label: '720p30', kbpsFactor: 0.6, maxFps: 30, scaleDownBy: 1.5 },
-  { label: '720p15', kbpsFactor: 0.4, maxFps: 15, scaleDownBy: 1.5 },
-  { label: '480p15', kbpsFactor: 0.25, maxFps: 15, scaleDownBy: 2.5 },
+  { label: '1080p60', kbpsFactor: 1.0, maxFps: 60, scaleDownBy: 1 },
+  { label: '1080p30', kbpsFactor: 0.5, maxFps: 30, scaleDownBy: 1 },
+  { label: '720p30', kbpsFactor: 0.3, maxFps: 30, scaleDownBy: 1.5 },
+  { label: '720p15', kbpsFactor: 0.2, maxFps: 15, scaleDownBy: 1.5 },
+  { label: '480p15', kbpsFactor: 0.12, maxFps: 15, scaleDownBy: 2.5 },
 ];
 
 export interface SubscriberSample {

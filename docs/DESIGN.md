@@ -568,17 +568,17 @@ Codec: negociamos com preferência configurável, default **VP9 → H.264 → VP
 
 Duas malhas de controle, ambas no host:
 
-**Egresso do host (proteção da sala).** Orçamento configurável, default **20 Mbps** (§11). O host soma o custo de todas as assinaturas ativas. Ao estourar, desce a escada de qualidade para os fluxos mais caros, na ordem:
+**Egresso do host (proteção da sala).** Orçamento configurável, default **20 Mbps** (§11). O host soma o custo de todas as assinaturas ativas. Ao estourar, desce a escada de qualidade para os fluxos mais caros. Escada real (`src/main/sfu/governor.ts`, `QUALITY_LADDER`), `kbpsFactor` × `videoBitrateKbps` (default **6000**, `RoomSession`'s `DEFAULT_ROOM_PARAMS` - calibrado pro topo da escada, 1080p60):
 
-| passo | resolução | fps | kbps |
-|---|---|---|---|
-| 0 | 1920×1080 | 30 | 2500 |
-| 1 | 1920×1080 | 20 | 1800 |
-| 2 | 1600×900 | 20 | 1200 |
-| 3 | 1280×720 | 15 | 800 |
-| 4 | 960×540 | 10 | 400 |
+| passo | rótulo | fps | `scaleDownBy` | kbps (padrão) |
+|---|---|---|---|---|
+| 0 | 1080p60 | 60 | 1 | 6000 |
+| 1 | 1080p30 | 30 | 1 | 3000 |
+| 2 | 720p30 | 30 | 1.5 | 1800 |
+| 3 | 720p15 | 15 | 1.5 | 1200 |
+| 4 | 480p15 | 15 | 2.5 | 720 |
 
-O host manda `quality_directive`; o transmissor aplica com `setParameters({encodings:[{maxBitrate, maxFramerate, scaleResolutionDownBy}]})`. Sinais de subida/descida: perda > 3% ou RTT crescente ou `availableOutgoingBitrate` abaixo do alvo → desce um passo (imediato); 20 s estável e folgado → sobe um passo (histerese, para não oscilar).
+O host manda `quality_directive`; o transmissor aplica com `setParameters({encodings:[{maxBitrate, maxFramerate, scaleResolutionDownBy}]})`. Sinais de subida/descida: perda > 5% do pior assinante ou pressão de CPU do publisher → desce um passo (imediato); N janelas saudáveis seguidas (default 4, `recoveryWindows`) → sobe um passo (histerese, para não oscilar). **1080p60 é o topo desde que o usuário pediu mais qualidade** (v0.4.1) — antes disso o topo era 1080p30; ver §11 sobre o efeito no orçamento de banda.
 
 **Local, no cliente (proteção da máquina).** A partir de **3 assinaturas simultâneas** ou CPU sustentada acima de 80% por 10 s, a UI avisa em português e oferece: reduzir qualidade dos fluxos assistidos, ou desassinar o menos usado. Conforme a decisão 6, **é orientação, não trava** — o usuário pode ignorar, e o teto (`maxRecommendedSubscriptions`, default 2) é configurável. O que nunca acontece é baixar um fluxo que ninguém pediu.
 
@@ -681,18 +681,29 @@ Meta de tempo: **< 10 s** do crash à mídia voltando (6 s de detecção + ~1 s 
 
 ## 11. Orçamento de banda e CPU (12 participantes)
 
-Base: 1080p30 a 2500 kbps de vídeo + 96 kbps de áudio ≈ **2,6 Mbps por fluxo**, ~1200 B de payload → **≈ 280 pacotes/s por fluxo por direção**.
+> **v0.4.1: o topo da escada virou 1080p60 / 6000 kbps** (era 1080p30 / 2500
+> kbps), a pedido do usuário — §8.5. A tabela abaixo está recalculada pro novo
+> valor. Efeito honesto: no topo da escada, uma sala com upload residencial
+> típico (§11) já sustenta bem menos assinaturas simultâneas do que sustentava
+> a 2500 kbps - o `Governor` (`src/main/sfu/governor.ts`) desce a escada assim
+> que QUALQUER assinante reporta perda > 5% ou o publisher reporta pressão de
+> CPU, então na prática 1080p60 só se sustenta com poucos espectadores
+> simultâneos ou um upload bem acima da média. Isso não é um bug: é o
+> adaptativo funcionando, só que agora o "teto" custa quase 2,3× mais caro que
+> antes, então o degrau costuma vir mais cedo.
 
-| Cenário | Assinaturas | Egresso do host | Pacotes/s no host | Veredicto |
+Base: 1080p60 a 6000 kbps de vídeo + 96 kbps de áudio ≈ **6,1 Mbps por fluxo**, ~1200 B de payload → **≈ 655 pacotes/s por fluxo por direção**.
+
+| Cenário | Assinaturas | Egresso do host (no topo, se ninguém degradar) | Pacotes/s no host | Veredicto |
 |---|---|---|---|---|
-| 1 transmissor, 11 assistem | 11 | 29 Mbps | 3.100 | acima do orçamento default → escada para o passo 1–2 |
-| 2 transmissores, todos assistem ambos | 22 | 57 Mbps | 6.200 | **pior caso realista**; a 720p15 cai para ~20 Mbps |
-| 3 transmissores, cada um assiste 2 | 24 | 62 Mbps | 6.700 | idem |
-| 12 transmissores × 11 espectadores | 132 | **343 Mbps** | 37.000 | **recusado por admissão** — nenhum PC doméstico faz isso |
+| 1 transmissor, 11 assistem | 11 | 67 Mbps | 7.200 | acima do upload residencial típico (§8.1 antigo assumia ~50 Mbps/0,6 reserva = 20 Mbps) → o primeiro assinante com perda já puxa a escada pra baixo |
+| 2 transmissores, todos assistem ambos | 22 | 134 Mbps | 14.500 | **pior caso realista**; só se sustenta perto do chão da escada (480p15, ~8 Mbps) |
+| 3 transmissores, cada um assiste 2 | 24 | 146 Mbps | 15.800 | idem |
+| 12 transmissores × 11 espectadores | 132 | **805 Mbps** | 86.700 | **recusado por admissão** — nenhum PC doméstico faz isso |
 
-**Ingresso do host** é barato e limitado: `nº de transmissores × 2,6 Mbps` ≤ 31 Mbps. O gargalo é sempre o **egresso**, porque o fan-out multiplica. É exatamente por isso que a regra "não encaminhar fluxo não assinado" (decisão 6) é a otimização mais importante do sistema, e não um detalhe de economia: ela transforma um custo de `transmissores × participantes` num custo de `assinaturas reais`, que na prática é 3–5× menor.
+**Ingresso do host** é barato e limitado: `nº de transmissores × 6,1 Mbps`. O gargalo é sempre o **egresso**, porque o fan-out multiplica. É exatamente por isso que a regra "não encaminhar fluxo não assinado" (decisão 6) é a otimização mais importante do sistema, e não um detalhe de economia: ela transforma um custo de `transmissores × participantes` num custo de `assinaturas reais`, que na prática é 3–5× menor.
 
-Default do orçamento: **20 Mbps** de egresso (assume ~50 Mbps de upload e reserva 60%). Configurável, e a UI pede o upload real do host na criação da sala.
+**Correção sobre o texto histórico deste parágrafo:** ele descrevia um "orçamento de egresso configurável, default 20 Mbps" como um limite agregado que o host somaria e aplicaria proativamente — **isso nunca foi implementado**. O `Governor` real é puramente reativo por fluxo: cada assinatura degrada (ou recupera) sozinha, com base só no que os PRÓPRIOS assinantes daquele fluxo reportam (`fractionLost > 5%`) e no que o publisher reporta de `cpuPressure` — não existe uma soma global de bitrate em lugar nenhum do código. Os "67 Mbps" etc. da tabela acima são só o custo bruto SE nada tivesse degradado ainda; na prática o primeiro sinal de perda em QUALQUER assinatura já reage. Um orçamento agregado de verdade (perguntar o upload do host e ratear entre os fluxos) continua sendo trabalho futuro, não algo que só precisa de reconfiguração.
 
 **CPU do host (SFU):** só SRTP + reescrita de cabeçalho, sem encoder. O spike da Fase 1 ([SPIKE-SFU.md](SPIKE-SFU.md)) mediu ~105 µs/pacote numa medição *pessimista* (fonte + SFU + todos os assinantes no mesmo processo) → **~64% de um núcleo para 6.200 pkt/s**. No build real, com a mídia no renderer e os assinantes em outros PCs, o custo só do SFU é bem menor.
 

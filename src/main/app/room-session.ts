@@ -45,7 +45,13 @@ import type { RoomParams, StreamInfo } from '../../shared/protocol.js';
 const DEFAULT_ROOM_PARAMS: RoomParams = {
   maxParticipants: 12,
   maxRecommendedSubscriptions: 2,
-  videoBitrateKbps: 2500,
+  // Calibrated to the governor's top rung, 1080p60 (src/main/sfu/governor.ts)
+  // - the ladder's other rungs are fractions of this. 12 participants at
+  // 6 Mbps/stream changes docs/DESIGN.md §11's egress math meaningfully
+  // (roughly 2.3x the old 2500kbps baseline); the 20 Mbps default egress
+  // budget in SfuMediaPlane's governor still applies, so it'll just step
+  // subscriptions down the ladder sooner under load than before.
+  videoBitrateKbps: 6000,
 };
 
 const WAKING_NOTICE =

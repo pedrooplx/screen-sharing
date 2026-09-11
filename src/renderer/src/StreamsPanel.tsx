@@ -71,12 +71,23 @@ function WatchTile({
     };
   }, [remote]);
 
+  // A floating, always-on-top window the user can freely move and resize by
+  // dragging its edges - unlike Element.requestFullscreen(), which always
+  // takes over the entire screen at a fixed size and hides everything else.
+  // Falls back to fullscreen only if the platform genuinely has no
+  // Picture-in-Picture (document.pictureInPictureEnabled false).
   const maximize = () => {
-    // requires the 'fullscreen' permission granted in src/main/index.ts's
-    // setPermissionRequestHandler - without it this rejects silently.
-    void ref.current
-      ?.requestFullscreen()
-      .catch((err: Error) => console.error('requestFullscreen failed:', err));
+    const el = ref.current;
+    if (!el) return;
+    if (document.pictureInPictureEnabled && !el.disablePictureInPicture) {
+      void el
+        .requestPictureInPicture()
+        .catch((err: Error) => console.error('requestPictureInPicture failed:', err));
+    } else {
+      // requires the 'fullscreen' permission granted in src/main/index.ts's
+      // setPermissionRequestHandler - without it this rejects silently.
+      void el.requestFullscreen().catch((err: Error) => console.error('requestFullscreen failed:', err));
+    }
   };
 
   return (
@@ -88,7 +99,7 @@ function WatchTile({
             autoPlay
             playsInline
             onDoubleClick={maximize}
-            title="Clique duas vezes para maximizar"
+            title="Clique duas vezes para abrir numa janela flutuante"
           />
         ) : (
           <div className="watch-placeholder">
@@ -107,8 +118,8 @@ function WatchTile({
         <span className="name">{owner}</span>
         <span className="watch-actions">
           {remote && (
-            <button className="ghost" onClick={maximize} title="Maximizar">
-              ⛶
+            <button className="ghost" onClick={maximize} title="Abrir numa janela flutuante">
+              🗗
             </button>
           )}
           {watching ? (

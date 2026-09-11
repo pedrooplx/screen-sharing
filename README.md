@@ -24,9 +24,11 @@ executável roda em todos os PCs; quem cria a sala vira o coordenador (host) da
 - **Sala efêmera**: deixa de existir quando o host sai ou perde o link com o
   relé. Sem histórico, sem gravação, e (por ora) **sem failover** — ver
   [Limitações conhecidas](#limitações-conhecidas).
-- Alvo de qualidade padrão: **1080p/30fps** por transmissão, adaptativo para
-  baixo até 720p/15fps sob pressão de banda ou CPU. Bitrate alvo configurável
-  (padrão ~2,5 Mbps por stream).
+- Alvo de qualidade padrão: **1080p/60fps** por transmissão (~6 Mbps), adaptativo
+  para baixo até 480p/15fps sob perda de pacote ou pressão de CPU. Isso exige
+  upload de sobra do lado de quem transmite — com poucos espectadores simultâneos
+  costuma segurar 1080p60; com vários, a escada desce mais cedo do que antes
+  (docs/DESIGN.md §11).
 - **Windows 11** é o alvo. A arquitetura permite portar depois; macOS/Linux não
   são implementados agora.
 - **Chat de texto fora de escopo** — há um ponto de extensão via data channel,
@@ -227,8 +229,17 @@ as fases avançam.
 6. **O primeiro uso dispara o alerta do Firewall do Windows** para a parte de
    mídia (a sinalização não recebe conexões de entrada, então não precisa de
    regra nenhuma). Sem permitir, ninguém vê vídeo.
-7. **Áudio é do sistema inteiro, não da janela escolhida.** Ao transmitir uma
-   janela específica, o vídeo é dela, mas o áudio continua sendo o do sistema.
+7. **Áudio é do sistema inteiro, não da janela escolhida — inclui apps como
+   Discord.** O loopback do Windows (WASAPI) captura tudo que está tocando no
+   dispositivo de saída padrão; não tem como o app excluir só um programa sem
+   um addon nativo (fora de escopo — ver risco 2 no docs/DESIGN.md §14).
+   **Contorno sem instalar nada**: Windows 11 deixa escolher o dispositivo de
+   saída **por aplicativo** — Configurações → Sistema → Som → "Volume do app e
+   preferências de dispositivo". Mude a saída do Discord (ou de qualquer app
+   que não deva entrar na transmissão) para um dispositivo diferente do que
+   está como padrão do sistema; como o loopback só pega o padrão, o som desse
+   app some da transmissão (você continua ouvindo normalmente, só não sai pros
+   espectadores). Mesmo truque funciona pra excluir jogos, notificações, etc.
 8. **Realimentação de áudio:** se você transmite áudio e assiste alguém ao
    mesmo tempo, seus espectadores também ouvem quem você está assistindo (o
    loopback do Windows captura tudo). A interface avisa quando as duas coisas

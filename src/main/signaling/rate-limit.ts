@@ -1,9 +1,12 @@
 /**
  * Per-IP handshake rate limiting for the host (docs/DESIGN.md section 6.4).
  *
- * Someone who only has the room code (not the password) cannot get past CPace,
- * but they can still make the host burn ~1 s of Argon2id per attempt. This caps
- * that: a sliding window of allowed attempts, then exponential backoff.
+ * Every attempt still costs the host ~1 s of Argon2id, CPace success or not -
+ * connecting to this app's single fixed room needs no password any more
+ * (docs/DESIGN.md section 6), so what this actually guards against now is
+ * someone hammering the host with connection attempts to burn its CPU, not
+ * password guessing. This caps that: a sliding window of allowed attempts,
+ * then exponential backoff.
  */
 
 export interface RateLimitConfig {

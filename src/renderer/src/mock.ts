@@ -27,7 +27,10 @@ function set(next: Partial<SessionSnapshot>): void {
 
 export function installMock(): void {
   const api: ErrosApi = {
-    async hostRoom({ nickname }) {
+    async enterRoom({ nickname }) {
+      // always mocks as "became the host" (richer preview: other
+      // participants + a stream) - this stub never talks to a real relay, so
+      // there's no "someone's already hosting" case to simulate here.
       set({ phase: 'connecting', nickname });
       await new Promise((r) => setTimeout(r, 700));
       set({
@@ -43,21 +46,6 @@ export function installMock(): void {
         ],
         streams: [
           { streamId: 's_ana', ownerPeerId: 'p_a', video: true, audio: true },
-        ],
-      });
-      return { ok: true, value: state };
-    },
-    async joinRoom({ nickname }) {
-      set({ phase: 'connecting', nickname });
-      await new Promise((r) => setTimeout(r, 700));
-      set({
-        phase: 'in-room',
-        selfPeerId: 'p_me',
-        epoch: 0,
-        notice: null,
-        roster: [
-          rosterEntry('p_host', 'pedro', 0, true, true),
-          rosterEntry('p_me', nickname, 3, false, true),
         ],
       });
       return { ok: true, value: state };

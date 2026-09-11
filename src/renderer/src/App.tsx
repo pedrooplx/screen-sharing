@@ -154,26 +154,21 @@ function FloatingVideo({
 
 function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
   const [nickname, setNickname] = useState('');
-  const [password, setPassword] = useState('');
-  const [busy, setBusy] = useState<null | 'host' | 'join'>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const connecting = phase === 'connecting' || phase === 'waking';
-  const disabled = busy !== null || connecting || !nickname.trim() || !password;
+  const disabled = busy || connecting || !nickname.trim();
 
-  const host = async () => {
+  // No more separate host/join choice: enterRoom() joins if the room already
+  // exists, or becomes its host if nobody's there yet - see
+  // RoomSession.enter() (src/main/app/room-session.ts).
+  const enter = async () => {
     setError(null);
-    setBusy('host');
-    const res = await window.erros.hostRoom({ nickname, password });
+    setBusy(true);
+    const res = await window.erros.enterRoom({ nickname });
     if (!res.ok) setError(res.error);
-    setBusy(null);
-  };
-  const join = async () => {
-    setError(null);
-    setBusy('join');
-    const res = await window.erros.joinRoom({ nickname, password });
-    if (!res.ok) setError(res.error);
-    setBusy(null);
+    setBusy(false);
   };
   // a cold-start retry can take up to ~75 s (docs/DESIGN.md §18.4) - let the
   // user back out instead of staring at a frozen button the whole time.
@@ -181,15 +176,8 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
   // of leaving it dangling, so this is always safe to fire.
   const cancel = () => {
     void window.erros.leaveRoom();
-    setBusy(null);
+    setBusy(false);
   };
-
-  const spinner = (
-    <>
-      <span className="spinner" />
-      {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
-    </>
-  );
 
   return (
     <>
@@ -204,28 +192,17 @@ function Lobby({ phase }: { phase: SessionSnapshot['phase'] }) {
             onChange={(e) => setNickname(e.target.value)}
           />
         </div>
-        <div className="field">
-          <label htmlFor="pw">Senha da sala</label>
-          <input
-            id="pw"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </div>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Sala única, sem código: quem sabe a senha combinada com o grupo
-          entra direto. Se ninguém estiver hospedando ainda, hospede você.
-        </p>
-        <div className="row">
-          <button className="primary" disabled={disabled} onClick={host}>
-            {busy === 'host' || (connecting && busy === null) ? spinner : 'Hospedar sala'}
-          </button>
-          <button className="primary" disabled={disabled} onClick={join}>
-            {busy === 'join' || (connecting && busy === null) ? spinner : 'Entrar na sala'}
-          </button>
-        </div>
-        {busy !== null && connecting && (
+        <button className="primary" disabled={disabled} onClick={enter}>
+          {busy || connecting ? (
+            <>
+              <span className="spinner" />
+              {phase === 'waking' ? 'Acordando o servidor…' : 'Conectando…'}
+            </>
+          ) : (
+            'Entrar'
+          )}
+        </button>
+        {busy && connecting && (
           <button className="ghost" style={{ marginTop: 8 }} onClick={cancel}>
             Cancelar
           </button>

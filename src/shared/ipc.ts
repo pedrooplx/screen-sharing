@@ -32,14 +32,8 @@ export interface SessionSnapshot {
   readonly notice: string | null;
 }
 
-export interface HostRoomRequest {
+export interface EnterRoomRequest {
   readonly nickname: string;
-  readonly password: string;
-}
-
-export interface JoinRoomRequest {
-  readonly nickname: string;
-  readonly password: string;
 }
 
 export type IpcResult<T> =
@@ -56,8 +50,7 @@ export interface CaptureSource {
 }
 
 export const IPC = {
-  hostRoom: 'session:host',
-  joinRoom: 'session:join',
+  enterRoom: 'session:enter',
   leaveRoom: 'session:leave',
   getSnapshot: 'session:snapshot',
   listSources: 'capture:list-sources',
@@ -72,8 +65,13 @@ export const IPC = {
 
 /** The surface exposed on `window.erros` by the preload bridge. */
 export interface ErrosApi {
-  hostRoom(req: HostRoomRequest): Promise<IpcResult<SessionSnapshot>>;
-  joinRoom(req: JoinRoomRequest): Promise<IpcResult<SessionSnapshot>>;
+  /**
+   * The only way in: no more separate host/join choice and no password.
+   * Joins the room if it exists, or becomes its host if nobody does yet -
+   * see RoomSession.enter() (src/main/app/room-session.ts) for how that
+   * auto-detection works and what it costs in terms of access control.
+   */
+  enterRoom(req: EnterRoomRequest): Promise<IpcResult<SessionSnapshot>>;
   leaveRoom(): Promise<IpcResult<SessionSnapshot>>;
   getSnapshot(): Promise<SessionSnapshot>;
   onUpdate(cb: (snapshot: SessionSnapshot) => void): () => void;

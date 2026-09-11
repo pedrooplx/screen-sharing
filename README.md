@@ -8,10 +8,14 @@ executável roda em todos os PCs; quem cria a sala vira o coordenador (host) da
 - **Ninguém precisa abrir porta no roteador.** A sinalização (quem entrou, senha,
   roster) passa por um relé hospedado gratuito; a mídia continua P2P direta via
   hole punching ICE.
-- **Sala única, sem código**: o app suporta exatamente uma sala. Entrada é só
-  **apelido + senha combinada com o grupo** — quem clicar em hospedar primeiro
-  vira o host. A senha nunca trafega (PAKE CPace) — nem para o relé, que só
-  encaminha bytes cifrados que ele não consegue ler.
+- **Sala única, sem código, sem senha**: o app suporta exatamente uma sala e
+  um único botão, **"Entrar"** — pede só o apelido, entra se já tem alguém
+  hospedando ou vira o host automaticamente se não tem. **Isso significa que
+  não há controle de acesso**: qualquer instalação deste app apontada pro
+  mesmo relé (o público, por padrão) entra direto — ver
+  [Limitações conhecidas](#limitações-conhecidas). A mídia continua cifrada
+  ponta a ponta (o relé só encaminha bytes que não consegue ler), só que a
+  chave agora é pública, não mais um segredo do grupo.
 
 > Estado atual: **Fases 0-3 concluídas** (sinalização, sessão e mídia
 > funcionando; failover automático de host está **parcado**, ver abaixo). Veja
@@ -81,20 +85,24 @@ npm run check:network
 
 ## Modelo de ameaça (resumo)
 
-A sala é um grupo de pessoas que já se conhecem e combinaram uma senha por fora.
-A confiança é *no grupo*; o host é um membro do grupo, não um terceiro; e o
-**relé de sinalização é tratado como rede hostil**, no mesmo nível do ISP.
+**Desde a v0.6, não existe mais senha nem código — ver
+[Limitações conhecidas](#limitações-conhecidas).** A sala não tem controle de
+acesso: qualquer pessoa com este app, apontada pro mesmo relé (o público, por
+padrão), entra. O que ainda vale: o host é um membro do grupo, não um
+terceiro, e o **relé de sinalização é tratado como rede hostil**, no mesmo
+nível do ISP — ele encaminha bytes cifrados que não consegue ler, mas (a
+partir da v0.6) não há mais nenhum segredo do grupo por trás dessa cifra.
 
 | Quem | O que consegue | O que **não** consegue |
 |---|---|---|
 | ISP / rede no caminho | ver que há tráfego, volume, horários | ler a sinalização ou a mídia |
 | O relé de sinalização | ver `roomId`, quantidade de conexões, IPs (rate limit) | ler qualquer conteúdo — CPace e os frames continuam cifrados ponta a ponta através dele |
-| Qualquer um com o app, sem a senha (a sala é única, não há código a proteger) | tentar entrar e ser bloqueado por rate limit (host e relé) | entrar, ver o roster, ver mídia, **ou atacar a senha offline** |
+| Qualquer um com o app (não há mais senha nem código separando "de dentro" de "de fora") | entrar direto, ver o roster, ver e ouvir qualquer mídia compartilhada | atacar nada offline — não porque haja um segredo protegido, mas porque não há segredo nenhum a atacar |
 | Alguém tentando se passar pelo host | fazer você conectar nele | passar o handshake — a conexão morre antes de qualquer dado |
-| Participante autorizado | assistir qualquer transmissão, ver nicknames e IPs externos dos demais | forjar mensagens de host |
-| O host | **ver e ouvir toda a mídia em claro** (v1) | ler a senha (ela nunca trafega, nem para o relé) |
+| Participante | assistir qualquer transmissão, ver nicknames e IPs externos dos demais | forjar mensagens de host |
+| O host | **ver e ouvir toda a mídia em claro** (v1) | nada de especial em relação à senha — não há mais uma para proteger |
 
-Detalhes e o que a criptografia cobre: [docs/DESIGN.md §10](docs/DESIGN.md) (modelo de ameaça) e [§18](docs/DESIGN.md) (o relé).
+Detalhes e o que a criptografia cobre: [docs/DESIGN.md §6](docs/DESIGN.md) (autenticação — e por que deixou de autenticar de verdade), [§10](docs/DESIGN.md) (modelo de ameaça) e [§18](docs/DESIGN.md) (o relé).
 
 ---
 
@@ -207,6 +215,14 @@ informações" → "Executar assim mesmo".
   `roomId`+`codeSalt` viraram constantes fixas embutidas no app em vez de
   sorteadas por sessão; `src/main/room/{base32,ip,room-code}.ts` (o codec do
   código v2) foi removido inteiramente. Entrada agora é só apelido + senha.
+- [x] **v0.6** — Sem senha, um único botão "Entrar" ([docs/DESIGN.md §6](docs/DESIGN.md)).
+  De novo por pedido explícito do usuário: `RoomSession.enter()` tenta entrar
+  e, se ninguém estiver hospedando (`no_such_room`), hospeda sozinho — acabou
+  a escolha manual entre "Criar sala"/"Entrar numa sala". `FIXED_PASSWORD`
+  junta-se às constantes fixas da v0.5. CPace e Argon2id continuam rodando
+  sem mudar uma linha, só que contra um segredo público — isso remove
+  qualquer controle de acesso real à sala, ver
+  [Limitações conhecidas #11](#limitações-conhecidas).
 
 ---
 
@@ -253,4 +269,14 @@ as fases avançam.
    estão ativas.
 9. **Windows 11 apenas. Sem auto-update.**
 10. **Sala efêmera:** esvaziou (ou o host saiu), acabou. Sem histórico, sem gravação.
+11. **Sem controle de acesso: qualquer instalação deste app entra na sala.**
+    Desde a v0.6, por pedido explícito do usuário, não há mais senha nem
+    código — um único botão "Entrar" hospeda ou entra automaticamente, só com
+    o apelido. Isso significa que qualquer pessoa rodando este app e apontada
+    pro mesmo relé (o público, `wss://erros-share-relay.onrender.com`, por
+    padrão) cai direto na sua sala e vê/ouve tudo que estiver sendo
+    compartilhado — não é um bug, é a troca que foi pedida. Ver
+    [docs/DESIGN.md §6](docs/DESIGN.md) para o detalhe técnico (CPace e
+    Argon2id continuam rodando, só que contra uma senha fixa e pública, então
+    deixam de autenticar qualquer coisa de fato).
 11. **Um único monitor por transmissão.**

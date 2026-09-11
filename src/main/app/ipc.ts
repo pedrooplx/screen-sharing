@@ -11,15 +11,13 @@ import { listSources, setPendingSource } from './capture.js';
 import {
   type CaptureSource,
   IPC,
-  type HostRoomRequest,
+  type EnterRoomRequest,
   type IpcResult,
-  type JoinRoomRequest,
   type MediaBody,
   type SessionSnapshot,
 } from '../../shared/ipc.js';
 import {
-  hostRoomRequestSchema,
-  joinRoomRequestSchema,
+  enterRoomRequestSchema,
   mediaBodySchema,
 } from '../../shared/ipc-schema.js';
 
@@ -86,42 +84,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   };
 
   ipcMain.handle(
-    IPC.hostRoom,
-    async (_e, raw: HostRoomRequest): Promise<IpcResult<SessionSnapshot>> => {
-      const parsed = hostRoomRequestSchema.safeParse(raw);
+    IPC.enterRoom,
+    async (_e, raw: EnterRoomRequest): Promise<IpcResult<SessionSnapshot>> => {
+      const parsed = enterRoomRequestSchema.safeParse(raw);
       if (!parsed.success) return { ok: false, error: 'pedido inválido' };
       await teardown();
-      // begin() + attach() before host() runs, so the renderer actually sees
+      // begin() + attach() before enter() runs, so the renderer actually sees
       // 'connecting'/'waking' while a sleeping relay wakes up (~30-50s).
       const s = RoomSession.begin();
       attach(s);
       try {
-        await s.host({ nickname: parsed.data.nickname, password: parsed.data.password });
+        await s.enter({ nickname: parsed.data.nickname });
         return { ok: true, value: s.snapshot() };
       } catch (err) {
-        log.error('hostRoom failed', err);
-        await discard(s);
-        return { ok: false, error: (err as Error).message };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    IPC.joinRoom,
-    async (_e, raw: JoinRoomRequest): Promise<IpcResult<SessionSnapshot>> => {
-      const parsed = joinRoomRequestSchema.safeParse(raw);
-      if (!parsed.success) return { ok: false, error: 'pedido inválido' };
-      await teardown();
-      const s = RoomSession.begin();
-      attach(s);
-      try {
-        await s.join({
-          nickname: parsed.data.nickname,
-          password: parsed.data.password,
-        });
-        return { ok: true, value: s.snapshot() };
-      } catch (err) {
-        log.error('joinRoom failed', err);
+        log.error('enterRoom failed', err);
         await discard(s);
         return { ok: false, error: (err as Error).message };
       }

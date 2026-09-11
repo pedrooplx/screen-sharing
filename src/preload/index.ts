@@ -12,8 +12,7 @@ import {
 } from '../shared/ipc.js';
 
 const api: ErrosApi = {
-  hostRoom: (req) => ipcRenderer.invoke(IPC.hostRoom, req),
-  joinRoom: (req) => ipcRenderer.invoke(IPC.joinRoom, req),
+  enterRoom: (req) => ipcRenderer.invoke(IPC.enterRoom, req),
   leaveRoom: () => ipcRenderer.invoke(IPC.leaveRoom),
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
   listSources: () => ipcRenderer.invoke(IPC.listSources),

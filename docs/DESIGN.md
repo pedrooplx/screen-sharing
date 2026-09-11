@@ -3,10 +3,10 @@
 
 | | |
 |---|---|
-| **Versão** | 0.5 — Fases 0-3 (mídia) concluídas; sinalização migrada para o relé hospedado; sala única (sem código) |
+| **Versão** | 0.6 — Fases 0-3 (mídia) concluídas; sinalização migrada para o relé hospedado; sala única, sem código, sem senha |
 | **Alvo** | Windows 11 x64 |
 | **Stack** | Electron + WebRTC (Chromium) + WebRTC nativo em Node (werift) + relé Node hospedado (`server/`) |
-| **Escala** | até 12 participantes, numa única sala |
+| **Escala** | até 12 participantes, numa única sala aberta a quem tiver o app |
 | **Status** | plano de controle sobre o relé + mídia P2P funcionando e testados; failover automático **parcado** (ver §18) |
 
 > Documentação e UI em pt-BR. Código, identificadores, campos de protocolo e comentários em inglês.
@@ -26,6 +26,15 @@
 > chegam à mesma identidade de sala sem trocar nenhum código, só a senha
 > combinada precisa bater. Ver §5 para o detalhe e o trade-off de segurança
 > que essa troca assume conscientemente.
+>
+> **v0.6 vai além, de novo por pedido explícito do usuário: nem senha existe
+> mais.** Um único botão "Entrar" (`RoomSession.enter()`) tenta entrar e, se
+> ninguém estiver hospedando ainda, hospeda automaticamente — sem escolha
+> manual de papel e sem nada para digitar além do apelido. `FIXED_PASSWORD`
+> junta-se a `FIXED_ROOM_ID`/`FIXED_CODE_SALT` como constante embutida no app.
+> **Isso remove qualquer controle de acesso real à sala** — ver §6 para o que
+> exatamente isso significa e por quê, dado o relé público compartilhado por
+> padrão, o usuário confirmou que é o que quer.
 
 ---
 
@@ -38,7 +47,7 @@ Consequência: o failover automático de host (Fase 2) foi PARCADO (código
 mantido em `parked/`, fora do build) porque o modelo de relé v1 não tem
 reconexão do host; ver §18.5.**
 
-**O que já existe e passa nos testes** (`npm test` → 155 testes, 19 arquivos;
+**O que já existe e passa nos testes** (`npm test` → 150 testes, 18 arquivos;
 `npm run typecheck` limpo — Node + web + `server/`; `npm audit` → 0
 vulnerabilidades em ambos os `package.json`):
 
@@ -49,9 +58,9 @@ vulnerabilidades em ambos os `package.json`):
 | Transporte | `src/main/net/{transport,ws-source,relay-link,relay-wire}.ts` | `Connection` roda sobre um `Transport` abstrato (§18.2): `WsTransport`+`WsConnectionSource` (WS local, só testes) ou `RelayHostLink`/`RelayPeerLink` (produção, via `server/`) |
 | Identidade da sala | `src/main/app/room-session.ts` (`FIXED_ROOM_ID`/`FIXED_CODE_SALT`) | sala única, fixa - sem código (§5, §18.4). `src/main/room/{base32,room-code}.ts` (codec do código v2) foram removidos na v0.5, não existem mais |
 | Relé (hospedado) | `server/src/{index,relay,wire}.ts` | multiplexador WS que só encaminha bytes opacos; deploy Render (`server/render.yaml`); ver §18 |
-| Sinalização | `src/main/signaling/{server,client,handshake,roster,rate-limit,heartbeat}.ts` | `SignalingServer` (host) + `SignalingClient` (peer), agora sobre um `Transport`/`ConnectionSource` injetado em vez de abrir o próprio socket; admissão por senha; rate limit por IP; heartbeat ping/pong |
+| Sinalização | `src/main/signaling/{server,client,handshake,roster,rate-limit,heartbeat}.ts` | `SignalingServer` (host) + `SignalingClient` (peer), agora sobre um `Transport`/`ConnectionSource` injetado em vez de abrir o próprio socket; handshake CPace roda igual, mas contra uma senha fixa e pública desde a v0.6 (§6) - rate limit por IP continua, agora contra flood de handshake, não contra adivinhação; heartbeat ping/pong |
 | Protocolo | `src/shared/protocol.ts` | todas as mensagens em `zod`; `epoch` no envelope e no `joined` |
-| **App shell** | `src/main/index.ts`, `src/main/app/{room-session,ipc}.ts`, `src/preload/index.ts`, `src/renderer/` | Electron + React (pt-BR); `RoomSession` (host abre `RelayHostLink`+`SignalingServer`, peer abre `RelayPeerLink`+`SignalingClient` direto, sem `PeerNode`); IPC tipado por `window.erros`; lobby + tela de sala com roster ao vivo e código. `npm run dev` sobe tudo |
+| **App shell** | `src/main/index.ts`, `src/main/app/{room-session,ipc}.ts`, `src/preload/index.ts`, `src/renderer/` | Electron + React (pt-BR); `RoomSession.enter()` decide sozinho entre hospedar/entrar (§5, §6) - só um botão, só apelido; IPC tipado por `window.erros`; lobby + tela de sala com roster ao vivo. `npm run dev` sobe tudo |
 | **Captura local** | `src/main/app/capture.ts`, `src/renderer/src/{capture.ts,CapturePanel.tsx}` | listar telas/janelas com thumbnail, `setDisplayMediaRequestHandler` com áudio de sistema (`audio: 'loopback'`), prévia local em `<video>` |
 | **SFU + mídia** | `src/main/sfu/{router,codecs,media-plane,governor}.ts`, `src/renderer/src/{rtc.ts,StreamsPanel.tsx}` | mini-SFU werift no `main`: 1 PC por publisher, 1 por (assinante×stream); encaminha RTP sem transcodificar; PLI ao primeiro pacote. Negociação **non-trickle**. Encaminhamento seletivo (`demand-changed` → pausa/retoma o encoder do dono). **Governor**: escada de 4 níveis, `stats_report` (perda/CPU) a cada 4 s, `quality_directive` com `scaleDownBy`. **werift↔werift testado** (`test/sfu/{router,media-plane,governor}.test.ts`); **werift↔Chromium só valida com o app real** (docs/TESTING-MEDIA.md) |
 | Spike | `scripts/spike-sfu-throughput.mts`, `docs/SPIKE-SFU.md` | werift sustenta ~6.200 pkt/s a ~64% de um núcleo (pior caso) |
@@ -351,7 +360,25 @@ quiser hospedar de novo depois disso reabre a mesma identidade fixa.
 
 ## 6. Autenticação e criptografia do plano de controle
 
-### 6.1 O que queremos
+> **v0.6, por pedido explícito do usuário: não existe mais senha.** Tudo
+> abaixo (§6.1-6.4) descreve o mecanismo exatamente como o código implementa
+> - CPace, Argon2id, os frames AEAD, o rate limit - e nada nisso mudou uma
+> linha. O que mudou é **de onde vem `password`** nessa fórmula:
+> `src/main/app/room-session.ts` agora usa `FIXED_PASSWORD`, uma constante
+> fixa embutida no app, no lugar de algo que o usuário digita. Efeito prático:
+> **§6.1 abaixo deixou de valer** - "só quem sabe a senha entra" não é mais
+> verdade quando a senha é pública. Qualquer instalação deste app, apontada
+> pro mesmo relé, autentica com sucesso; não há mais nada online *nem*
+> offline pra atacar, porque não há mais segredo nenhum a proteger. O PAKE
+> continua rodando (não vale a pena arrancar Argon2id/CPace do meio só porque
+> o segredo que eles protegiam virou público - o resultado de segurança é
+> idêntico com ou sem eles: zero controle de acesso), mas ele não está mais
+> fazendo o trabalho de autenticação que o nome sugere. §6.4 ainda vale por um
+> motivo diferente do que descreve: sem senha pra adivinhar, o rate limit
+> continua útil contra alguém só tentando esgotar a CPU do host com handshakes
+> repetidos (`src/main/signaling/rate-limit.ts`).
+
+### 6.1 O que queríamos (v0.1-v0.5, antes da sala sem senha)
 
 Só quem sabe a senha entra; quem tem só o código não consegue nem entrar nem espiar; a senha não trafega nem em hash; e um atacante que capture o handshake completo **não deve conseguir atacar a senha offline**. Esse último requisito é o que exige um PAKE de verdade — um desafio-resposta com Argon2id vaza um MAC sobre transcript conhecido, o que dá ao atacante ativo um oráculo offline para testar bilhões de senhas.
 
@@ -385,7 +412,7 @@ k_s2c        = HKDF(ISK, "frame-s2c/v1", 32)
 roomMediaKey = HKDF(w,   "media-key/v1", 32)     # igual para todos, sobrevive ao failover
 ```
 
-`w` depende apenas de (senha, salt), então é calculado **uma vez por processo** e reutilizado em todo handshake — inclusive nos reconnects e no failover. Isso nos deixa usar parâmetros caros (64 MiB) sem penalizar o uso normal, enquanto o atacante que tenta adivinhar paga 64 MiB **por tentativa e obrigatoriamente online**, contra um host que também aplica rate limit.
+`w` depende apenas de (senha, salt), então é calculado **uma vez por processo** e reutilizado em todo handshake — inclusive nos reconnects e no failover. Isso nos deixa usar parâmetros caros (64 MiB) sem penalizar o uso normal. (Na v0.1-v0.5 isso também custava caro a quem tentasse adivinhar a senha, 64 MiB por tentativa e obrigatoriamente online contra um host com rate limit - ver a nota no topo do §6: com a senha fixa e pública da v0.6, não há mais nada a adivinhar, então esse benefício específico não se aplica mais.)
 
 `roomMediaKey` vem de `w`, não de `ISK`, justamente para ser igual em todos os participantes e sobreviver a troca de host — é o que habilita o E2EE opcional de mídia (§8.4).
 
@@ -393,9 +420,11 @@ roomMediaKey = HKDF(w,   "media-key/v1", 32)     # igual para todos, sobrevive a
 
 Depois da confirmação, cada frame é `AES-256-GCM`, nonce = `4 bytes fixos ‖ contador u64 por direção` (estritamente crescente; repetição = derrubar a conexão), AAD = `versão ‖ direção ‖ tamanho`. Payload = JSON UTF-8 validado por `zod`. Limite de 256 KiB por frame.
 
-### 6.4 Defesas do host contra quem só tem o código
+### 6.4 Rate limit no host (motivo mudou na v0.6, mecanismo não)
 
-Máximo de 3 handshakes concorrentes; 5 tentativas por IP em 60 s, depois backoff exponencial até 15 min; toda falha de senha responde no mesmo tempo (sem oráculo de timing); um `w` errado simplesmente não fecha a confirmação; nenhuma informação da sala (roster, nicknames, quem transmite) é revelada antes da confirmação. A senha só existe em memória — **nunca em disco**, nem em log, nem em crash dump (o buffer é zerado ao sair da sala; `w` também).
+Máximo de 3 handshakes concorrentes; 5 tentativas por IP em 60 s, depois backoff exponencial até 15 min; toda falha responde no mesmo tempo (sem oráculo de timing); nenhuma informação da sala (roster, nicknames, quem transmite) é revelada antes da confirmação. `w` só existe em memória — **nunca em disco**, nem em log, nem em crash dump (o buffer é zerado ao sair da sala).
+
+Isso existia (v0.1-v0.5) para encarecer tentar adivinhar a senha. Com a senha fixa e pública (nota no topo do §6), não há mais o que adivinhar - o que sobra de valor real é impedir que alguém abra handshakes repetidos só para queimar CPU do host em Argon2id (`src/main/signaling/rate-limit.ts`), um DoS de baixo esforço que continuaria funcionando mesmo sem senha nenhuma no meio.
 
 ---
 

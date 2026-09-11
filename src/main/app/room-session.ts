@@ -5,11 +5,13 @@
  *   - host: a SignalingServer fed by a RelayHostLink
  *   - peer: a SignalingClient over a RelayPeerLink
  *
- * This build supports exactly one room (by user request) - there is no room
- * code to generate, share, or type in. FIXED_ROOM_ID/FIXED_CODE_SALT below are
- * the same for every host and every joiner, so the two sides arrive at an
- * identical relay routing key and Argon2 salt with no exchange at all; the
- * only thing that still has to match between host and peer is the password.
+ * This build supports exactly one room, with no password (by user request) -
+ * `enter()` below is the only thing the UI calls: it tries to join, and if
+ * nobody is hosting yet (`no_such_room`) becomes the host instead, with no
+ * separate "create" vs "join" action and nothing to type but a nickname.
+ * FIXED_ROOM_ID/FIXED_CODE_SALT/FIXED_PASSWORD are the same for every install,
+ * so any two copies of this app arrive at an identical relay routing key and
+ * CPace secret with no exchange at all.
  *
  * Signaling always goes through the hosted relay (docs/DESIGN.md section 2.2 /
  * 18) - nobody opens an inbound port for the control plane any more. The relay
@@ -29,6 +31,7 @@ import {
 } from '../crypto/kdf.js';
 import {
   RelayHostLink,
+  RelayLinkError,
   RelayPeerLink,
   openWithRetry,
 } from '../net/relay-link.js';
@@ -61,24 +64,30 @@ const DEFAULT_ROOM_PARAMS: RoomParams = {
 const WAKING_NOTICE =
   'Acordando o servidor de sinalização (pode levar até 1 minuto)…';
 
-// This app supports exactly one room. roomId is the relay's routing key
-// (server/src/relay.ts keys its Map<roomId, Room> by this), and codeSalt
-// domain-separates the Argon2 salt (crypto/kdf.ts's deriveArgonSalt) so the
-// same password doesn't hash to the same key across DIFFERENT rooms - a
-// concern that no longer applies by construction, since there's only ever
-// one. Both are fixed, arbitrary constants rather than random per-session
-// values so a joining peer can arrive at them with no exchange whatsoever;
-// the only thing that still needs to match between host and peer is the
-// password itself.
+// This app supports exactly one room, with no password. roomId is the
+// relay's routing key (server/src/relay.ts keys its Map<roomId, Room> by
+// this); codeSalt feeds the Argon2 salt (crypto/kdf.ts's deriveArgonSalt);
+// FIXED_PASSWORD stands in for the password CPace authenticates with. All
+// three are fixed, arbitrary constants - the same for every install of this
+// app - rather than values a person supplies, so any two copies of the app
+// arrive at an identical `w` (see crypto/kdf.ts's derivation chain) with no
+// exchange whatsoever: no code, no password, nothing to type but a nickname.
 //
-// Trade-off worth stating plainly: every installation of this exact app
-// build now shares the same Argon2 salt, so a rainbow table computed against
-// it would work against any of them - previously each hosting session got a
-// fresh random salt. Argon2id is still deliberately slow/memory-hard and the
-// password is still the only real secret, so this is an acceptable trade for
-// a small private-group tool, not a public multi-tenant service.
+// Security trade-off, stated plainly: CPace, Argon2id and the AES-256-GCM
+// framing downstream all still run exactly as before - the wire protocol and
+// every other module are completely unaware this changed - but the secret
+// they're built to protect is now a public constant baked into the app
+// itself. That means there is no longer any real access control on this
+// room: anyone running this exact build, pointed at the same relay (the
+// public shared one by default), lands in it. This only makes sense because
+// there is nothing left to keep private *for* - a code and a password both
+// existed to scope who could join a given room among many; with a single
+// fixed room, "who can join" is answered by "who has this app and this
+// relay URL" instead. Confirmed and accepted by the user (2026-09-11) -
+// see docs/DESIGN.md section 6 for the full reasoning.
 const FIXED_ROOM_ID = new Uint8Array([0x65, 0x72, 0x72, 0x31]);
 const FIXED_CODE_SALT = new Uint8Array([0x73, 0x68, 0x61, 0x72, 0x65, 0x31]);
+const FIXED_PASSWORD = 'erros-share/no-password/v1';
 const FIXED_ROOM_ID_HEX = Buffer.from(FIXED_ROOM_ID).toString('hex');
 
 export interface RoomSessionEvents {
@@ -89,7 +98,6 @@ export interface RoomSessionEvents {
 
 export interface HostOptions {
   readonly nickname: string;
-  readonly password: string;
   readonly roomParams?: RoomParams;
   readonly argonParams?: ArgonParams;
   /** override the relay URL (tests, or a self-hosted relay - see server/README.md) */
@@ -98,9 +106,22 @@ export interface HostOptions {
 
 export interface JoinOptions {
   readonly nickname: string;
-  readonly password: string;
   readonly relayUrl?: string;
 }
+
+/** What the UI actually calls - see enter() below. */
+export interface EnterOptions {
+  readonly nickname: string;
+  readonly roomParams?: RoomParams;
+  readonly argonParams?: ArgonParams;
+  readonly relayUrl?: string;
+}
+
+/** enter() flips between these at most this many times before giving up -
+ *  covers the realistic case (two people click at nearly the same instant,
+ *  one becomes host and the other's join retries once) without ever looping
+ *  on a persistently broken relay. */
+const MAX_ENTER_ATTEMPTS = 3;
 
 export class RoomSession extends EventEmitter<RoomSessionEvents> {
   #phase: SessionPhase = 'idle';
@@ -148,13 +169,54 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     return session;
   }
 
+  static async enter(opts: EnterOptions): Promise<RoomSession> {
+    const session = RoomSession.begin();
+    await session.enter(opts);
+    return session;
+  }
+
+  /**
+   * The only entry point the UI uses: no more separate "host" vs "join"
+   * choice. Tries to join; if nobody is hosting yet (no_such_room), becomes
+   * the host instead. Both failure modes are checked before either method
+   * has created any link/client/server of its own (RelayPeerLink.open() and
+   * RelayHostLink.open() are what reject with these reasons), so retrying
+   * in place needs no cleanup between attempts.
+   */
+  async enter(opts: EnterOptions): Promise<void> {
+    let asHost = false;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_ENTER_ATTEMPTS; attempt++) {
+      try {
+        if (asHost) await this.host(opts);
+        else await this.join(opts);
+        return;
+      } catch (err) {
+        if (this.#leaving) return;
+        lastErr = err;
+        const reason = err instanceof RelayLinkError ? err.reason : undefined;
+        if (!asHost && reason === 'no_such_room') {
+          asHost = true;
+        } else if (asHost && reason === 'room_exists') {
+          asHost = false;
+        } else {
+          throw err;
+        }
+      }
+    }
+    // exhausted MAX_ENTER_ATTEMPTS still flip-flopping between the two
+    // reasons - a live-lock this unlikely isn't worth retrying forever, but
+    // it must still surface as a failure, not a silent no-op success.
+    throw lastErr;
+  }
+
   async host(opts: HostOptions): Promise<void> {
     this.#nickname = opts.nickname;
     this.#phase = 'connecting';
     this.#emit();
 
     const argonSalt = deriveArgonSalt(FIXED_ROOM_ID, FIXED_CODE_SALT);
-    this.#w = derivePasswordKey(opts.password, argonSalt, opts.argonParams);
+    this.#w = derivePasswordKey(FIXED_PASSWORD, argonSalt, opts.argonParams);
     wipe(argonSalt);
 
     const roomParams = opts.roomParams ?? DEFAULT_ROOM_PARAMS;
@@ -201,7 +263,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       roomId: FIXED_ROOM_ID,
       // derived lazily against the host's own argonParams (from hello_ack),
       // not assumed up front - see docs/DESIGN.md section 0, deviation 7.
-      secret: { password: opts.password, codeSalt: FIXED_CODE_SALT },
+      secret: { password: FIXED_PASSWORD, codeSalt: FIXED_CODE_SALT },
       nickname: opts.nickname,
       transport: link,
     });

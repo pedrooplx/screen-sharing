@@ -18,6 +18,7 @@ const api: ErrosApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
   listSources: () => ipcRenderer.invoke(IPC.listSources),
   setCaptureSource: (id) => ipcRenderer.invoke(IPC.setSource, id),
+  copyToClipboard: (text) => ipcRenderer.invoke(IPC.copyToClipboard, text),
   sendMedia: (body) => ipcRenderer.send(IPC.sendMedia, body),
   onUpdate: (cb: (snapshot: SessionSnapshot) => void) => {
     const handler = (_e: unknown, snapshot: SessionSnapshot) => cb(snapshot);

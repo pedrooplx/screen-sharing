@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MediaStreamTrack,
   RTCPeerConnection,
@@ -142,6 +142,47 @@ describe('SfuRouter', () => {
     expect(sub.received()).toBeGreaterThan(5);
     expect(router.subscriberCount('s1')).toBe(1);
     stopPub();
+  }, 20000);
+
+  it('does not request a keyframe before the subscriber itself is connected', async () => {
+    // Regression test: the SFU used to ask the publisher for a keyframe the
+    // moment it saw the *next* RTP packet after subscribe() was called - a
+    // request that can (and in practice, reliably does) land before this
+    // brand-new subscriber's own ICE/DTLS setup is done, so the resulting
+    // keyframe gets silently dropped and the subscriber never sees video.
+    const router = new SfuRouter();
+    routers.push(router);
+    const stopPub = await publish(router, 'p_pub', 'keyframe-timing');
+
+    // RTCRtpReceiver isn't exported from werift's package root; every
+    // instance shares one prototype, so grabbing it off a throwaway receiver
+    // lets us spy on the SFU's internal receiver towards the publisher too.
+    const proto = Object.getPrototypeOf(clientPc().addTransceiver('video').receiver);
+    const pliSpy = vi.spyOn(proto, 'sendRtcpPLI');
+
+    try {
+      const pc = clientPc();
+      pc.onTrack.subscribe(() => {});
+      const { offerSdp } = await router.subscribe('p_sub', 'keyframe-timing');
+      await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+      await pc.setLocalDescription(await pc.createAnswer());
+      await waitIce(pc);
+
+      // the publisher has been streaming continuously since publish() -
+      // several packets have already crossed the SFU by now, but this
+      // subscriber hasn't even sent its answer yet, so it cannot be
+      // 'connected'.
+      await new Promise((r) => setTimeout(r, 200));
+      expect(pliSpy).not.toHaveBeenCalled();
+
+      await router.completeSubscribe('p_sub', 'keyframe-timing', pc.localDescription!.sdp);
+      await until(() => pc.connectionState === 'connected');
+      await until(() => pliSpy.mock.calls.length > 0);
+      expect(pliSpy).toHaveBeenCalled();
+    } finally {
+      pliSpy.mockRestore();
+      stopPub();
+    }
   }, 20000);
 
   it('rejects subscribing to an unknown stream', async () => {

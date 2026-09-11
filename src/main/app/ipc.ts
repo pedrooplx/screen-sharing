@@ -4,7 +4,7 @@
  * in the renderer.
  */
 
-import { ipcMain, type BrowserWindow } from 'electron';
+import { clipboard, ipcMain, type BrowserWindow } from 'electron';
 import log from 'electron-log/main.js';
 import { RoomSession } from './room-session.js';
 import { listSources, setPendingSource } from './capture.js';
@@ -151,6 +151,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         return { ok: false, error: 'id inválido' };
       }
       setPendingSource(id);
+      return { ok: true, value: null };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.copyToClipboard,
+    (_e, text: unknown): IpcResult<null> => {
+      // Electron's native clipboard, not navigator.clipboard: the renderer's
+      // permission handler (src/main/index.ts) only grants
+      // media/display-capture, so the web Clipboard API would just reject.
+      if (typeof text !== 'string' || text.length === 0 || text.length > 4096) {
+        return { ok: false, error: 'texto inválido' };
+      }
+      clipboard.writeText(text);
       return { ok: true, value: null };
     },
   );

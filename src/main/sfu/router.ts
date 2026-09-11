@@ -47,10 +47,16 @@ export interface SfuRouterEvents {
 
 type Kind = 'video' | 'audio';
 
+/** min gap between PLIs forwarded to one publisher (docs/DESIGN.md 8.4:
+ *  "no máximo 1 por segundo por fluxo") - several subscribers requesting a
+ *  keyframe around the same time must not flood the publisher. */
+const PLI_MIN_INTERVAL_MS = 1000;
+
 interface Publisher {
   readonly pc: RTCPeerConnection;
   readonly info: StreamInfo;
   readonly tracks: Partial<Record<Kind, MediaStreamTrack>>;
+  lastPliAt: number;
 }
 
 interface Subscription {
@@ -127,7 +133,7 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
       }
     });
 
-    this.#publishers.set(streamId, { pc, info, tracks });
+    this.#publishers.set(streamId, { pc, info, tracks, lastPliAt: 0 });
     this.emit('stream-live', info);
     return { answerSdp: mustSdp(pc) };
   }
@@ -160,12 +166,14 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
 
     const pc = this.#newPc();
     const disposers: Array<() => void> = [];
+    let videoTransceiver: ReturnType<RTCPeerConnection['addTransceiver']> | undefined;
 
     for (const kind of ['video', 'audio'] as const) {
       const source = pub.tracks[kind];
       if (!source) continue;
       const relay = new MediaStreamTrack({ kind });
-      pc.addTransceiver(relay, { direction: 'sendonly' });
+      const transceiver = pc.addTransceiver(relay, { direction: 'sendonly' });
+      if (kind === 'video') videoTransceiver = transceiver;
       const rtpSub = source.onReceiveRtp.subscribe((rtp: RtpPacket) => {
         try {
           relay.writeRtp(rtp);
@@ -174,21 +182,6 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
         }
       });
       disposers.push(() => unsub(rtpSub));
-      // ask the publisher for a keyframe so the new subscriber renders quickly
-      if (kind === 'video') {
-        source.onReceiveRtp.once((rtp: RtpPacket) => {
-          const ssrc = source.ssrc ?? rtp.header.ssrc;
-          try {
-            pub.pc.getTransceivers().forEach((t) => {
-              if (t.receiver.track?.kind === 'video') {
-                void t.receiver.sendRtcpPLI(ssrc);
-              }
-            });
-          } catch {
-            /* best effort */
-          }
-        });
-      }
     }
 
     if (disposers.length === 0) {
@@ -206,8 +199,28 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
       throw new SfuError(`subscribe offer failed: ${(err as Error).message}`);
     }
 
+    // Forward this subscriber's own keyframe requests to the publisher too
+    // (docs/DESIGN.md 8.4) - belt-and-braces in case the connect-time PLI
+    // below still gets lost, or the subscriber's decoder needs a fresh one
+    // later (e.g. after a network blip).
+    if (videoTransceiver) {
+      const pliSub = videoTransceiver.sender.onPictureLossIndication.subscribe(() => {
+        this.#requestKeyframe(pub);
+      });
+      disposers.push(() => unsub(pliSub));
+    }
+
     pc.connectionStateChange.subscribe((state) => {
-      if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+      if (state === 'connected') {
+        // Only NOW is it safe to ask the publisher for a keyframe: asking any
+        // earlier (e.g. right after subscribe(), as this used to) races this
+        // subscriber's own ICE/DTLS setup - a keyframe that arrives at the
+        // SFU before this PC can carry it is silently dropped, and the
+        // subscriber is left with only delta frames (nothing to decode)
+        // until the encoder's next spontaneous keyframe, which for mostly
+        // static screen-share content can be minutes away or never.
+        this.#requestKeyframe(pub);
+      } else if (state === 'failed' || state === 'closed' || state === 'disconnected') {
         this.unsubscribe(subscriberPeerId, streamId);
       }
     });
@@ -215,6 +228,27 @@ export class SfuRouter extends EventEmitter<SfuRouterEvents> {
     this.#subscriptions.set(key, { pc, disposers });
     this.#emitDemand(streamId, pub.info.ownerPeerId);
     return { offerSdp: mustSdp(pc) };
+  }
+
+  /** Ask the publisher for a fresh keyframe, rate-limited per stream. */
+  #requestKeyframe(pub: Publisher): void {
+    const source = pub.tracks.video;
+    if (!source) return;
+    const now = Date.now();
+    if (now - pub.lastPliAt < PLI_MIN_INTERVAL_MS) return;
+    pub.lastPliAt = now;
+
+    const send = (ssrc: number) => {
+      try {
+        pub.pc.getTransceivers().forEach((t) => {
+          if (t.receiver.track?.kind === 'video') void t.receiver.sendRtcpPLI(ssrc);
+        });
+      } catch {
+        /* best effort */
+      }
+    };
+    if (source.ssrc) send(source.ssrc);
+    else source.onReceiveRtp.once((rtp: RtpPacket) => send(source.ssrc ?? rtp.header.ssrc));
   }
 
   #emitDemand(streamId: string, ownerPeerId: string): void {
@@ -296,10 +330,20 @@ function mustSdp(pc: RTCPeerConnection): string {
   return sdp;
 }
 
+/**
+ * werift's `Event.subscribe()` returns `{ unSubscribe, disposer }` (capital
+ * S) - NOT the `unsubscribe` spelling this checked for previously, which
+ * made every disposer built from it a silent no-op. That leaked the
+ * publisher-side `onReceiveRtp` listener for the lifetime of the publisher:
+ * a subscriber that unsubscribed (or whose PC failed/closed) kept getting
+ * `relay.writeRtp(rtp)` called on its now-closed track forever, alongside
+ * every other listener that piled up the same way. Accepts a plain disposer
+ * function too, for non-werift subscriptions.
+ */
 function unsub(subscription: unknown): void {
-  const s = subscription as { unsubscribe?: () => void } | (() => void);
+  const s = subscription as { unSubscribe?: () => void } | (() => void);
   if (typeof s === 'function') s();
-  else if (s && typeof s.unsubscribe === 'function') s.unsubscribe();
+  else if (s && typeof s.unSubscribe === 'function') s.unSubscribe();
 }
 
 function safeClose(pc: RTCPeerConnection): void {

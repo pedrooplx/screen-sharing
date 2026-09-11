@@ -192,9 +192,13 @@ function Room({ snap }: { snap: SessionSnapshot }) {
   const timer = useRef<number | undefined>(undefined);
   const media = useMedia(snap.streams, snap.epoch);
 
-  const copy = useCallback(() => {
+  const copy = useCallback(async () => {
     if (!snap.code) return;
-    void navigator.clipboard.writeText(snap.code);
+    // Electron's native clipboard via IPC, not navigator.clipboard - the
+    // renderer's permission handler only grants media/display-capture, so
+    // the web Clipboard API rejects here and this used to silently "succeed".
+    const res = await window.erros.copyToClipboard(snap.code);
+    if (!res.ok) return;
     setCopied(true);
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => setCopied(false), 1500);

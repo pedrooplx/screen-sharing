@@ -71,11 +71,21 @@ function WatchTile({
     };
   }, [remote]);
 
+  const maximize = () => {
+    void ref.current?.requestFullscreen().catch(() => {});
+  };
+
   return (
     <div className="watch-tile">
       <div className="watch-video">
         {remote ? (
-          <video ref={ref} autoPlay playsInline />
+          <video
+            ref={ref}
+            autoPlay
+            playsInline
+            onDoubleClick={maximize}
+            title="Clique duas vezes para maximizar"
+          />
         ) : (
           <div className="watch-placeholder">
             {watching ? (
@@ -94,15 +104,22 @@ function WatchTile({
           {owner}
           {stream.audio ? ' 🔊' : ''}
         </span>
-        {watching ? (
-          <button className="ghost" onClick={() => media.unsubscribe(stream.streamId)}>
-            Parar
-          </button>
-        ) : (
-          <button className="primary" onClick={() => void media.subscribe(stream.streamId)}>
-            Assistir
-          </button>
-        )}
+        <span className="watch-actions">
+          {remote && (
+            <button className="ghost" onClick={maximize} title="Maximizar">
+              ⛶
+            </button>
+          )}
+          {watching ? (
+            <button className="ghost" onClick={() => media.unsubscribe(stream.streamId)}>
+              Parar
+            </button>
+          ) : (
+            <button className="primary" onClick={() => void media.subscribe(stream.streamId)}>
+              Assistir
+            </button>
+          )}
+        </span>
       </div>
     </div>
   );

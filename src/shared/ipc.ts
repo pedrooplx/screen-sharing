@@ -64,6 +64,7 @@ export const IPC = {
   getSnapshot: 'session:snapshot',
   listSources: 'capture:list-sources',
   setSource: 'capture:set-source',
+  copyToClipboard: 'session:copy-to-clipboard',
   sendMedia: 'media:send',
   // main -> renderer
   onUpdate: 'session:update',
@@ -82,6 +83,13 @@ export interface ErrosApi {
   listSources(): Promise<CaptureSource[]>;
   /** tell the main process which source the next getDisplayMedia() should use */
   setCaptureSource(id: string): Promise<IpcResult<null>>;
+  /**
+   * Copy text to the OS clipboard via Electron's native `clipboard` module,
+   * not the web Clipboard API - the renderer's permission handler
+   * (src/main/index.ts) only grants `media`/`display-capture`, so
+   * `navigator.clipboard.writeText()` would silently fail here.
+   */
+  copyToClipboard(text: string): Promise<IpcResult<null>>;
   /** send a media negotiation body (publish_offer, subscribe, subscribe_answer, ...) */
   sendMedia(body: MediaBody): void;
   /** media bodies coming back (publish_answer, subscribe_offer, stream_state, media_error) */

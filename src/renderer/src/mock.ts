@@ -88,6 +88,16 @@ export function installMock(): void {
     async setCaptureSource() {
       return { ok: true, value: null };
     },
+    async copyToClipboard(text) {
+      // outside Electron's locked-down permission handler, the real
+      // Clipboard API works fine for this dev-only mock.
+      try {
+        await navigator.clipboard.writeText(text);
+        return { ok: true, value: null };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    },
     sendMedia() {
       /* no SFU in mock mode */
     },

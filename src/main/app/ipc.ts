@@ -37,6 +37,8 @@ function idleSnapshot(): SessionSnapshot {
     roster: [],
     streams: [],
     maxRecommendedSubscriptions: 2,
+    canRetryMapping: false,
+    retryingMapping: false,
     notice: null,
   };
 }
@@ -115,6 +117,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     push(snap);
     return { ok: true, value: snap };
   });
+
+  ipcMain.handle(
+    IPC.retryMapping,
+    async (): Promise<IpcResult<SessionSnapshot>> => {
+      if (!session) return { ok: false, error: 'nenhuma sala ativa' };
+      try {
+        await session.retryHostMapping();
+        return { ok: true, value: session.snapshot() };
+      } catch (err) {
+        log.error('retryHostMapping failed', err);
+        return { ok: false, error: (err as Error).message };
+      }
+    },
+  );
 
   ipcMain.handle(IPC.getSnapshot, (): SessionSnapshot => {
     return session?.snapshot() ?? idleSnapshot();

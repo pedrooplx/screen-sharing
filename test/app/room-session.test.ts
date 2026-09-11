@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createServer } from 'node:net';
 import { RoomSession } from '../../src/main/app/room-session.js';
-import { decodeRoomCode } from '../../src/main/room/room-code.js';
+import { decodeRoomCode, encodeRoomCode } from '../../src/main/room/room-code.js';
+import type { HostEndpointInfo } from '../../src/main/room/host-endpoint.js';
 import type { SessionSnapshot } from '../../src/shared/ipc.js';
 import { MIN_ARGON_PARAMS } from '../../src/main/crypto/kdf.js';
 
@@ -107,5 +109,66 @@ describe('RoomSession', () => {
     await peer.leave();
     await settle();
     expect(hostBox.last.roster.map((e) => e.nickname)).toEqual(['host']);
+  });
+
+  it('offers a retry that re-runs port mapping and clears the blocker', async () => {
+    const bound = await new Promise<number>((resolve) => {
+      const s = createServer();
+      s.listen(0, '127.0.0.1', () => {
+        const p = (s.address() as { port: number }).port;
+        s.close(() => resolve(p));
+      });
+    });
+
+    let attempt = 0;
+    const discover = async ({
+      roomId,
+      codeSalt,
+      port,
+    }: {
+      port: number;
+      roomId?: Uint8Array;
+      codeSalt?: Uint8Array;
+    }): Promise<HostEndpointInfo> => {
+      attempt++;
+      const open = attempt >= 2; // first call fails, retry succeeds
+      const host = {
+        family: 'ipv4' as const,
+        address: '203.0.113.9',
+        port: bound,
+      };
+      return {
+        roomId: roomId!,
+        codeSalt: codeSalt!,
+        code: encodeRoomCode({ version: 1, roomId: roomId!, codeSalt: codeSalt!, host }),
+        endpoint: host,
+        mappingMethod: open ? 'upnp' : 'manual',
+        directlyReachable: false,
+        blocker: open ? null : 'no_inbound_path',
+        lanIp: '192.168.0.42',
+        close: async () => {},
+      };
+    };
+
+    const host = await RoomSession.host({
+      nickname: 'pedro',
+      password: 'x',
+      port: bound,
+      argonParams: MIN_ARGON_PARAMS,
+      discover: discover as never,
+      bindAddress: '127.0.0.1',
+    });
+    const box = track(host);
+
+    expect(box.last.codeStatus?.blocker).toBe('no_inbound_path');
+    expect(box.last.canRetryMapping).toBe(true);
+    expect(box.last.codeStatus?.manualForwardTo).toBe('192.168.0.42');
+
+    await host.retryHostMapping();
+
+    expect(box.last.codeStatus?.blocker).toBeNull();
+    expect(box.last.codeStatus?.mappingMethod).toBe('upnp');
+    expect(box.last.canRetryMapping).toBe(false);
+    expect(box.last.notice).toMatch(/pronto para hospedar/i);
   });
 });

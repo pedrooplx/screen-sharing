@@ -45,6 +45,8 @@ export interface RoomSessionEvents {
   media: [MediaBody];
 }
 
+type DiscoverFn = typeof discoverHostEndpoint;
+
 export interface HostOptions {
   readonly nickname: string;
   readonly password: string;
@@ -54,6 +56,8 @@ export interface HostOptions {
   /** tests only: skip STUN + NAT, host on 127.0.0.1 */
   readonly skipNat?: boolean;
   readonly bindAddress?: string;
+  /** tests only: override STUN + NAT discovery */
+  readonly discover?: DiscoverFn;
 }
 
 export interface JoinOptions {
@@ -100,6 +104,12 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
   #node: PeerNode | undefined;
   #media: SfuMediaPlane | undefined;
   #closeMapping: (() => Promise<void>) | undefined;
+  #discover: DiscoverFn = discoverHostEndpoint;
+  /** kept so `retryHostMapping()` can re-run discovery for the same room */
+  #hostContext:
+    | { roomId: Uint8Array; codeSalt: Uint8Array; port: number }
+    | undefined;
+  #retryingMapping = false;
 
   private constructor() {
     super();
@@ -110,6 +120,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
   static async host(opts: HostOptions): Promise<RoomSession> {
     const session = new RoomSession();
     session.#nickname = opts.nickname;
+    if (opts.discover) session.#discover = opts.discover;
     session.#phase = 'discovering';
     session.#emit();
 
@@ -134,23 +145,9 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       });
       await session.#startServer(roomId, roomParams, bound, '127.0.0.1');
     } else {
-      const info = await discoverHostEndpoint({ port, roomId, codeSalt });
-      session.#closeMapping = info.close;
-      session.#code = info.code;
-      session.#codeStatus = {
-        mappingMethod: info.mappingMethod,
-        externalAddress: info.endpoint.address,
-        directlyReachable: info.directlyReachable,
-        blocker: info.blocker,
-        manualForwardPort: info.blocker === 'no_inbound_path' ? port : null,
-        manualForwardTo: info.blocker === 'no_inbound_path' ? '(seu IP local)' : null,
-      };
-      if (info.blocker === 'carrier_grade_nat') {
-        session.#notice =
-          'Seu provedor usa CGNAT — você não consegue ser host. Peça a outra pessoa.';
-      } else if (info.blocker === 'no_inbound_path') {
-        session.#notice = `Não foi possível abrir a porta automaticamente. Encaminhe TCP ${port} no seu roteador.`;
-      }
+      session.#hostContext = { roomId, codeSalt, port };
+      const info = await session.#discover({ port, roomId, codeSalt });
+      session.#applyEndpointInfo(info, port);
       await session.#startServer(
         roomId,
         roomParams,
@@ -210,6 +207,76 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     return session;
   }
 
+  // --- host port mapping -------------------------------------------
+
+  /** True when a "retry port mapping" button should be offered. */
+  get canRetryMapping(): boolean {
+    return (
+      this.#hostContext !== undefined &&
+      this.#node === undefined &&
+      !this.#retryingMapping &&
+      (this.#codeStatus?.blocker === 'no_inbound_path' ||
+        this.#codeStatus?.mappingMethod === 'manual')
+    );
+  }
+
+  get retryingMapping(): boolean {
+    return this.#retryingMapping;
+  }
+
+  /**
+   * Re-run PCP/NAT-PMP/UPnP for the running room (e.g. after the user turned on
+   * UPnP in the router). The server stays up; only the code / status update.
+   */
+  async retryHostMapping(): Promise<void> {
+    const ctx = this.#hostContext;
+    if (!ctx || this.#node || this.#retryingMapping) return;
+    this.#retryingMapping = true;
+    this.#emit();
+    try {
+      const info = await this.#discover({
+        port: ctx.port,
+        roomId: ctx.roomId,
+        codeSalt: ctx.codeSalt,
+      });
+      if (this.#closeMapping) await this.#closeMapping().catch(() => {});
+      this.#applyEndpointInfo(info, ctx.port);
+      if (!info.blocker && info.mappingMethod !== 'manual') {
+        this.#notice = `Porta aberta via ${info.mappingMethod}. Pronto para hospedar.`;
+      }
+    } catch (err) {
+      this.#notice = `Não deu para abrir a porta: ${(err as Error).message}`;
+    } finally {
+      this.#retryingMapping = false;
+      this.#emit();
+    }
+  }
+
+  #applyEndpointInfo(
+    info: Awaited<ReturnType<typeof discoverHostEndpoint>>,
+    port: number,
+  ): void {
+    this.#closeMapping = info.close;
+    this.#code = info.code;
+    const forwardTo = info.lanIp ?? 'o IP local deste PC';
+    this.#codeStatus = {
+      mappingMethod: info.mappingMethod,
+      externalAddress: info.endpoint.address,
+      directlyReachable: info.directlyReachable,
+      blocker: info.blocker,
+      manualForwardPort: info.blocker === 'no_inbound_path' ? port : null,
+      manualForwardTo: info.blocker === 'no_inbound_path' ? forwardTo : null,
+    };
+    if (info.blocker === 'carrier_grade_nat') {
+      this.#notice =
+        'Seu provedor usa CGNAT — você não consegue ser host. Peça a outra pessoa para criar a sala.';
+    } else if (info.blocker === 'no_inbound_path') {
+      this.#notice =
+        `Não foi possível abrir a porta automaticamente. Ative UPnP no seu roteador e tente de novo, ` +
+        `ou encaminhe TCP ${port} para ${forwardTo}:${port}.`;
+    }
+  }
+
   // --- lifecycle -----------------------------------------------------
 
   async leave(): Promise<void> {
@@ -240,6 +307,8 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       streams: this.streams,
       maxRecommendedSubscriptions: (node?.roomParams ?? this.#roomParams)
         .maxRecommendedSubscriptions,
+      canRetryMapping: this.canRetryMapping,
+      retryingMapping: this.#retryingMapping,
       notice: this.#notice,
     };
   }

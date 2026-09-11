@@ -16,6 +16,8 @@ const IDLE: SessionSnapshot = {
   roster: [],
   streams: [],
   maxRecommendedSubscriptions: 2,
+  canRetryMapping: false,
+  retryingMapping: false,
   notice: null,
 };
 
@@ -208,10 +210,33 @@ function Room({ snap }: { snap: SessionSnapshot }) {
             <button onClick={copy}>{copied ? 'Copiado' : 'Copiar'}</button>
           </div>
           {snap.codeStatus?.blocker === 'no_inbound_path' && (
-            <p className="muted" style={{ marginBottom: 0 }}>
-              Encaminhe <b>TCP {snap.codeStatus.manualForwardPort}</b> no seu
-              roteador para o IP local deste PC — senão ninguém consegue entrar.
-            </p>
+            <div className="port-help">
+              <p className="muted" style={{ margin: '0 0 10px' }}>
+                A porta não abriu sozinha. Só quem está na sua rede consegue
+                entrar até você <b>ativar o UPnP no roteador e tentar de novo</b>,
+                ou encaminhar{' '}
+                <b>
+                  TCP {snap.codeStatus.manualForwardPort} →{' '}
+                  {snap.codeStatus.manualForwardTo}:
+                  {snap.codeStatus.manualForwardPort}
+                </b>
+                .
+              </p>
+              <button
+                className="primary"
+                disabled={!snap.canRetryMapping || snap.retryingMapping}
+                onClick={() => void window.erros.retryMapping()}
+              >
+                {snap.retryingMapping ? (
+                  <>
+                    <span className="spinner" />
+                    Tentando abrir a porta…
+                  </>
+                ) : (
+                  'Tentar abrir a porta de novo'
+                )}
+              </button>
+            </div>
           )}
         </div>
       )}

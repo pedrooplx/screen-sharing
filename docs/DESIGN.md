@@ -412,9 +412,9 @@ sequenceDiagram
     U->>M: criar sala + senha
     M->>M: roomId, codeSalt, w = Argon2id(...)  [~1 s, uma vez]
     par mapeamento
-        M->>R: PCP MAP (porta 47821 TCP)      [timeout 3 s]
-        M->>R: NAT-PMP se PCP falhar         [timeout 3 s]
-        M->>R: UPnP-IGD AddPortMapping        [timeout 5 s]
+        M->>R: PCP / NAT-PMP MAP (porta 47821 TCP)   [timeout 4 s]
+        M->>R: UPnP-IGD: M-SEARCH SSDP repetido       [a cada 2 s, ate 14 s]
+        M->>R: AddPortMapping no gateway achado
     and endereco externo
         M->>S: Binding Request (UDP)          [RTO 500 ms, 3 retries, 2 servidores]
         S-->>M: XOR-MAPPED-ADDRESS -> IP externo
@@ -423,12 +423,15 @@ sequenceDiagram
         M->>M: listener TCP + SFU no ar
         M-->>U: codigo de sala (IP do STUN + porta mapeada)
     else nenhum mapeamento
-        M-->>U: tela "port forwarding manual": encaminhe TCP 47821 -> IP local
-        M->>M: auto-teste periodico; assim que a porta abrir, gera o codigo
+        M->>M: listener + SFU no ar mesmo assim (LAN funciona)
+        M-->>U: aviso "TCP 47821 -> IP LAN" + botao "Tentar de novo"
+        U->>M: (ativa UPnP no router) -> retryHostMapping()
     end
 ```
 
-Detalhe que exige cuidado e é fácil errar: **STUN é UDP e não descobre o mapeamento externo de uma porta TCP.** Então o código de sala se monta assim: **IP externo vem do STUN**; **porta vem do mapeamento** (que pedimos explicitamente como `externalPort == internalPort`) ou do que o usuário configurou manualmente. Se o mapeamento devolver porta externa diferente da pedida, usamos a que o router devolveu. Se o IP do STUN for igual ao IP local, não há NAT (raro, mas então também não há o que mapear) e seguimos direto.
+Detalhe que exige cuidado e é fácil errar: **STUN é UDP e não descobre o mapeamento externo de uma porta TCP.** Então o código de sala se monta assim: **IP externo vem do STUN**; **porta vem do mapeamento** (pedimos explicitamente `externalPort == internalPort`) ou do que o usuário configurou manualmente. Se o IP do STUN for igual ao IP local, não há NAT e seguimos direto.
+
+**O servidor sobe mesmo sem mapeamento.** Ele liga em `0.0.0.0:47821` de qualquer jeito — LAN e loopback funcionam na hora, e o `retryHostMapping()` (botão na UI) pode abrir a porta depois sem recriar a sala. `RoomSession.#hostContext` guarda `{roomId, codeSalt, port}` justamente pra isso.
 
 Renovação: mapeamentos UPnP/PCP têm lease. Renovamos a cada `lease/2` (default 30 min) e removemos no `beforeQuit`. Carrier-grade NAT (IP do STUN em `100.64.0.0/10`) é detectado e reportado explicitamente: "seu provedor usa CGNAT, você não pode ser host" — é um caso real e frequente em internet móvel/rural.
 
@@ -674,7 +677,7 @@ Cada item aqui vira uma linha na seção "Limitações conhecidas" do README (Fa
 
 5. NAT simétrico nas duas pontas, sem TURN configurado → **não conecta**. A UI diz isso com esse nome.
 6. Host atrás de CGNAT → **não pode ser host**. Detectamos e dizemos.
-7. Sem UPnP e sem port forwarding manual → **não pode ser host**. A UI mostra a porta exata e o passo a passo.
+7. Sem UPnP e sem port forwarding manual → **não pode ser host**. A UI mostra `TCP <porta> → <IP LAN>:<porta>` e um botão "Tentar abrir a porta de novo" (`RoomSession.retryHostMapping()` — re-roda a descoberta sem derrubar o servidor). A tentativa automática repete o M-SEARCH SSDP a cada 2 s por 14 s (`nat-mapping.ts`).
 8. Após failover, **o código de sala antigo deixa de funcionar**. Quem está dentro migra sozinho; quem está fora precisa do código novo.
 9. **Sem simulcast:** um espectador com internet ruim faz o transmissor baixar a qualidade para todos.
 10. Host vê a mídia em claro (§10).

@@ -337,6 +337,15 @@ label {
   padding: 5px 12px;
   font-size: 12px;
 }
+
+.port-help {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  font-size: 13px;
+}
 .spinner {
   display: inline-block;
   width: 14px;

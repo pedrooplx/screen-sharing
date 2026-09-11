@@ -41,6 +41,10 @@ export interface SessionSnapshot {
   readonly streams: StreamInfo[];
   /** soft cap on simultaneous subscriptions before the UI warns */
   readonly maxRecommendedSubscriptions: number;
+  /** show a "retry opening the port" button */
+  readonly canRetryMapping: boolean;
+  /** a port-mapping retry is in progress */
+  readonly retryingMapping: boolean;
   readonly notice: string | null;
 }
 
@@ -76,6 +80,7 @@ export const IPC = {
   hostRoom: 'session:host',
   joinRoom: 'session:join',
   leaveRoom: 'session:leave',
+  retryMapping: 'session:retry-mapping',
   getSnapshot: 'session:snapshot',
   listSources: 'capture:list-sources',
   setSource: 'capture:set-source',
@@ -91,6 +96,8 @@ export interface ErrosApi {
   hostRoom(req: HostRoomRequest): Promise<IpcResult<SessionSnapshot>>;
   joinRoom(req: JoinRoomRequest): Promise<IpcResult<SessionSnapshot>>;
   leaveRoom(): Promise<IpcResult<SessionSnapshot>>;
+  /** re-run automatic port mapping for a running room */
+  retryMapping(): Promise<IpcResult<SessionSnapshot>>;
   getSnapshot(): Promise<SessionSnapshot>;
   onUpdate(cb: (snapshot: SessionSnapshot) => void): () => void;
   /** enumerate capturable screens and windows */

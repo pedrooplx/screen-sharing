@@ -36,7 +36,14 @@ export interface MapPortOptions {
   readonly description?: string;
   readonly pmpTimeoutMs?: number;
   readonly upnpTimeoutMs?: number;
+  /** how many times to re-broadcast the SSDP search while looking for a
+   *  gateway (some routers ignore the first M-SEARCH). */
+  readonly upnpSearchIntervalMs?: number;
 }
+
+const PMP_TIMEOUT_MS = 4_000;
+const UPNP_TIMEOUT_MS = 14_000;
+const UPNP_SEARCH_INTERVAL_MS = 2_000;
 
 /** Handle for an active mapping; call `close()` on shutdown to release it. */
 export interface ActiveMapping {
@@ -85,7 +92,8 @@ async function tryPmp(
     });
     const mapping = await gateway.map(opts.port, internalHost, {
       protocol: 'tcp',
-      signal: AbortSignal.timeout(opts.pmpTimeoutMs ?? 3_000),
+      externalPort: opts.port,
+      signal: AbortSignal.timeout(opts.pmpTimeoutMs ?? PMP_TIMEOUT_MS),
     });
     const gatewayExternalIp = await gateway
       .externalIp({ signal: AbortSignal.timeout(2_000) })
@@ -101,19 +109,25 @@ async function tryUpnp(
   opts: MapPortOptions,
   internalHost: string,
 ): Promise<ActiveMapping | null> {
+  const searchInterval = opts.upnpSearchIntervalMs ?? UPNP_SEARCH_INTERVAL_MS;
   const client = upnpNat({
     autoRefresh: true,
     description: opts.description ?? 'erros-share',
+    gatewaySearchInterval: searchInterval,
   });
-  const deadline = AbortSignal.timeout(opts.upnpTimeoutMs ?? 5_000);
+  const deadline = AbortSignal.timeout(opts.upnpTimeoutMs ?? UPNP_TIMEOUT_MS);
   try {
-    for await (const gateway of client.findGateways({ signal: deadline })) {
+    for await (const gateway of client.findGateways({
+      signal: deadline,
+      searchInterval,
+    })) {
       try {
         const mapping = await gateway.map(opts.port, internalHost, {
           protocol: 'tcp',
+          externalPort: opts.port,
         });
         const gatewayExternalIp = await gateway
-          .externalIp({ signal: AbortSignal.timeout(2_000) })
+          .externalIp({ signal: AbortSignal.timeout(3_000) })
           .catch(() => null);
         return finalize('upnp', gateway, mapping, internalHost, gatewayExternalIp);
       } catch {

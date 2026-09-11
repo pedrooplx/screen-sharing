@@ -172,7 +172,9 @@ as fases avançam.
    A interface informa e o design explica como apontar um TURN próprio.
 2. **Host atrás de CGNAT → não pode ser host.** O app detecta e avisa.
 3. **Sem UPnP e sem port forwarding manual → não pode ser host.** O app mostra a
-   porta exata e o passo a passo.
+   porta exata e o IP local, e oferece um botão **"Tentar abrir a porta de novo"**
+   (útil depois de ativar UPnP no roteador) — a tentativa automática já repete a
+   busca SSDP por ~14 s antes de desistir.
 4. **Após um failover, o código de sala antigo deixa de funcionar** (ele contém
    IP:porta do host antigo). Quem já está na sala migra sozinho; quem está de
    fora precisa do código novo.

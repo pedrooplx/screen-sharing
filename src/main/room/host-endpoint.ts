@@ -21,7 +21,7 @@ import {
   discoverExternalAddress,
   isCarrierGradeNat,
 } from '../net/stun.js';
-import { allLanIpv4 } from '../net/local-ip.js';
+import { allLanIpv4, primaryLanIpv4 } from '../net/local-ip.js';
 import {
   CODE_SALT_BYTES,
   ROOM_ID_BYTES,
@@ -42,6 +42,8 @@ export interface HostEndpointInfo {
   readonly directlyReachable: boolean;
   /** non-null means the user cannot host as-is; the UI must surface it */
   readonly blocker: HostBlocker;
+  /** this PC's LAN IPv4, to show in a manual port-forward instruction */
+  readonly lanIp: string | null;
   /** release the NAT mapping on shutdown */
   close(): Promise<void>;
 }
@@ -97,6 +99,7 @@ export async function discoverHostEndpoint(
     mappingMethod: method,
     directlyReachable,
     blocker,
+    lanIp: mapping?.result.internalHost ?? primaryLanIpv4(),
     close: async () => {
       await mapping?.close();
     },

@@ -741,8 +741,10 @@ Meta de tempo: **< 10 s** do crash à mídia voltando (6 s de detecção + ~1 s 
 
 - um novo HELLO de host para o mesmo `roomId` **reivindica** a sala
   (`#claimHandoff`) em vez de receber `room_exists` — reatribui `room.host`,
-  gera um `hostToken` novo, e reenvia `PEER_UP` para cada peer ainda
-  conectado, exatamente como se tivessem acabado de discar;
+  gera um `hostToken` novo, reenvia `PEER_UP` para cada peer ainda conectado
+  (exatamente como se tivessem acabado de discar), e manda `HOST_CLAIMED`
+  (`0x09`) diretamente ao socket de cada um desses sobreviventes — o sinal
+  que `#rehome()` usa para saber a hora certa de tentar (ver abaixo);
 - tráfego peer→host é **descartado silenciosamente** (protege contra um
   sobrevivente que tenta cedo demais e cairia no `Connection` já-cifrado do
   host antigo, que ainda está tecnicamente conectado até seu próprio `close`
@@ -755,14 +757,24 @@ Meta de tempo: **< 10 s** do crash à mídia voltando (6 s de detecção + ~1 s 
 
 **Cliente (`src/main/app/room-session.ts`).** `leave()` chama
 `#handoffOrClose()`: se há alguém no roster além de quem está saindo, manda
-`HANDOFF` ao relé e chama `SignalingServer.transferHost()` (nomeia o sucessor
-por `succession.ts`, já existente - o mesmo de §9.1 -, broadcast de
-`host_transfer{successorPeerId, epoch}`, espera `graceMs`, depois
-`#closeForHandoff()`: fecha o próprio link **sem** chacoalhar cada peer
-individualmente - ao contrário de `close()`, isso nunca vira um `KICK`, que
-no relé mataria o socket do peer para sempre). Qualquer coisa que falhe aqui
-(sem sobreviventes, a chamada ao relé falhando) cai de volta no `close()` de
-sempre.
+`HANDOFF` ao relé e chama `SignalingServer.transferHost()` — marca o servidor
+como "fechando" **imediatamente** (antes de mais nada, não só ao final),
+nomeia o sucessor por `succession.ts` (já existente - o mesmo de §9.1),
+broadcast de `host_transfer{successorPeerId, epoch}`, para o heartbeat de
+todo mundo ali mesmo, espera `graceMs`, depois `#closeForHandoff()`: fecha o
+próprio link **sem** chacoalhar cada peer individualmente - ao contrário de
+`close()`, isso nunca vira um `KICK`, que no relé mataria o socket do peer
+para sempre. Qualquer coisa que falhe aqui (sem sobreviventes, a chamada ao
+relé falhando) cai de volta no `close()` de sempre. Marcar "fechando" logo de
+cara importa: com o `#closing` só virando `true` no fechamento final,
+`#onPeerGone` continuava fazendo `broadcast()` de `roster_update` para os
+sobreviventes durante a janela de graça (por exemplo, quando o sucessor
+recém-promovido derruba sua própria conexão de peer) - um frame cifrado a
+mais chegando bem na hora em que um sobrevivente está no meio de um
+handshake novo (mesmo `RelayPeerLink`, ver abaixo) é lido como "chegou cedo
+demais" e fica em fila para decifrar com as chaves da sessão NOVA, que não
+são as mesmas com que foi cifrado - `AeadError: authentication failed`,
+achado ao vivo contra o relé de produção.
 
 Cada sobrevivente recebe `host_transfer` na conexão que já tinha e reage:
 
@@ -774,16 +786,22 @@ Cada sobrevivente recebe `host_transfer` na conexão que já tinha e reage:
   `epoch + 1`;
 - **todo mundo mais** (`#rehome`): reaproveita a conexão que já tinha com o
   relé (`RelayPeerLink` - nunca é fechada num handoff gracioso justamente
-  para isto funcionar), espera `REHOME_INITIAL_DELAY_MS` (500 ms, tempo de
-  sobra para a reivindicação do sucessor - uma operação rápida, majoritariamente
-  local - já ter terminado), e faz **exatamente uma** tentativa de handshake
-  nova, não um loop de retry: a reivindicação do relé dispara `PEER_UP`
-  **uma vez** por sobrevivente, criando **um** `Connection` do lado do host
-  novo, cuja máquina de estados (`hello → hello_ack → pake_peer → ...`) é
-  estritamente linear - um segundo `hello` no mesmo `connId` corromperia ou
-  derrubaria essa `Connection`, não teria uma segunda chance. `#phase`
-  deliberadamente **não** sai de `in_room` durante isso (só `notice` muda,
-  "Trocando de host…") para a UI não saltar pra Lobby no meio do caminho.
+  para isto funcionar), espera o sinal `HOST_CLAIMED` do relé
+  (`RelayPeerLink#onHandoffReady`) - não mais um atraso fixo adivinhado (uma
+  primeira versão esperava `500ms`, calibrado contra o relé de teste local,
+  de latência quase zero; contra o relé real implantado, a reivindicação do
+  sucessor sozinha - handshake TLS novo, Argon2id, ida e volta até o Render -
+  passava fácil de `500ms`, então a tentativa do sobrevivente disparava cedo
+  demais e era descartada, achado ao vivo) - com um teto de espera
+  (`REHOME_MAX_WAIT_MS`, 9 s) só para o caso de ninguém jamais reivindicar, e
+  então faz **exatamente uma** tentativa de handshake nova, não um loop de
+  retry: a reivindicação do relé dispara `PEER_UP` **uma vez** por
+  sobrevivente, criando **um** `Connection` do lado do host novo, cuja
+  máquina de estados (`hello → hello_ack → pake_peer → ...`) é estritamente
+  linear - um segundo `hello` no mesmo `connId` corromperia ou derrubaria
+  essa `Connection`, não teria uma segunda chance. `#phase` deliberadamente
+  **não** sai de `in_room` durante isso (só `notice` muda, "Trocando de
+  host…") para a UI não saltar pra Lobby no meio do caminho.
 
 **`#phase` só chega em `left` para um sobrevivente** se o handoff falhar de
 verdade (ninguém para assumir, ou o sucessor não responde dentro de
@@ -1148,6 +1166,7 @@ um deployable standalone sem puxar Electron/werift/etc. `test/relay/wire-compat.
 0x06 HOST_GONE  rele->peer (fecha em seguida)
 0x07 KICK       host->rele:   [connId u32 BE]                       (derruba 1 peer)
 0x08 HANDOFF    host->rele:   sem corpo (segura a sala por HANDOFF_GRACE_MS p/ handoff gracioso, §9.3)
+0x09 HOST_CLAIMED  rele->peer: sem corpo ("o sucessor acabou de reivindicar, tente agora" - §9.3)
 0x10 DATA_H     host<->rele:  [connId u32 BE][isBinary u8][payload] (por peer)
 0x11 DATA_P     peer<->rele:  [isBinary u8][payload]                (peer só tem 1 canal: o host)
 0x20 PING / 0x21 PONG   qualquer direção, sem corpo (keep-alive)

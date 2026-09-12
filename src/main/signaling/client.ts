@@ -40,6 +40,8 @@ export interface SignalingClientOptions {
   readonly heartbeatMaxMissed?: number;
   /** reject a `joined` whose epoch is below this (used when re-homing) */
   readonly minEpoch?: number;
+  /** per-handshake-step timeout override (see handshake.ts's PeerHandshakeConfig) */
+  readonly handshakeTimeoutMs?: number;
 }
 
 export interface SignalingClientEvents {
@@ -98,6 +100,9 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
     await runPeerHandshake(conn, {
       roomId: this.#opts.roomId,
       deriveW: (params) => this.#deriveW(params),
+      ...(this.#opts.handshakeTimeoutMs !== undefined
+        ? { timeoutMs: this.#opts.handshakeTimeoutMs }
+        : {}),
     });
     conn.outboundFrom = 'pending';
 
@@ -169,6 +174,18 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
       /* ignore */
     }
     this.#conn.close(1000, 'bye');
+  }
+
+  /**
+   * Stop this client WITHOUT closing its transport - unlike close(), which
+   * always tears the underlying connection down. RoomSession uses this when
+   * re-homing to a new host after a graceful handoff (docs/DESIGN.md section
+   * 18.5): the same relay transport is about to be handed to a fresh
+   * SignalingClient, and this instance's heartbeat must stop sending into a
+   * connection it no longer owns instead of leaking a timer forever.
+   */
+  detach(): void {
+    this.#stopHeartbeat();
   }
 
   #startHeartbeat(conn: Connection): void {

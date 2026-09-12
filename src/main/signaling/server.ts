@@ -161,9 +161,9 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
   }
 
   /**
-   * Graceful handoff (docs/DESIGN.md section 9.2): name the best successor,
-   * tell everyone, give them a moment to act, then close. Near-zero
-   * interruption vs. waiting for a heartbeat timeout.
+   * Graceful handoff (docs/DESIGN.md section 9.2 / 18.5): name the best
+   * successor, tell everyone, give them a moment to act, then close.
+   * Near-zero interruption vs. waiting for a heartbeat timeout.
    */
   async transferHost(graceMs = 1_500): Promise<void> {
     const order = successionOrder(
@@ -180,7 +180,31 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
       epoch: this.#epoch + 1,
     });
     await new Promise((r) => setTimeout(r, graceMs));
-    await this.close();
+    await this.#closeForHandoff();
+  }
+
+  /**
+   * Close this server's own connection source without touching individual
+   * peer links - unlike close()/crash(), this never sends `bye` or calls
+   * conn.close() per peer. Over the relay, conn.close() on a peer's
+   * Connection maps to a KICK, which severs that peer's socket at the relay
+   * for good - exactly what transferHost() must not do, since a surviving
+   * peer needs that same socket to re-handshake with whoever claims the
+   * room next (RoomSession pairs this with RelayHostLink.handoff() so the
+   * relay holds the room open instead of tearing it down the moment this
+   * source closes - see server/src/relay.ts).
+   */
+  async #closeForHandoff(): Promise<void> {
+    this.#closing = true;
+    for (const link of this.#links.values()) {
+      if (link.heartbeatTimer) clearInterval(link.heartbeatTimer);
+      link.heartbeat?.stop();
+    }
+    this.#links.clear();
+    if (this.#source) {
+      await this.#source.close();
+      this.#source = undefined;
+    }
   }
 
   /** Send one body to one connected peer. No-op if that peer is gone. */

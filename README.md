@@ -18,7 +18,9 @@ executável roda em todos os PCs; quem cria a sala vira o coordenador (host) da
   chave agora é pública, não mais um segredo do grupo.
 
 > Estado atual: **Fases 0-3 concluídas** (sinalização, sessão e mídia
-> funcionando; failover automático de host está **parcado**, ver abaixo). Veja
+> funcionando; failover automático de host *disparado por crash* está
+> **parcado**, mas uma saída voluntária do host agora faz handoff gracioso —
+> ver abaixo). Veja
 > [docs/DESIGN.md](docs/DESIGN.md) para a arquitetura completa — em especial o
 > **§18**, que documenta o relé — e o [status por fase](#status-por-fase) abaixo.
 
@@ -27,8 +29,9 @@ executável roda em todos os PCs; quem cria a sala vira o coordenador (host) da
 ## Assunções desta versão
 
 - **Nickname por sessão**, sem cadastro nem conta persistente.
-- **Sala efêmera**: deixa de existir quando o host sai ou perde o link com o
-  relé. Sem histórico, sem gravação, e (por ora) **sem failover** — ver
+- **Sala efêmera**: deixa de existir quando o host sai sem que ninguém assuma,
+  ou perde o link com o relé sem avisar (crash). Sem histórico, sem
+  gravação, e (por ora) **sem failover para uma queda abrupta** — ver
   [Limitações conhecidas](#limitações-conhecidas).
 - Alvo de qualidade padrão: **1080p/60fps** por transmissão (~6 Mbps), adaptativo
   para baixo até 480p/15fps sob perda de pacote ou pressão de CPU. Isso exige
@@ -196,8 +199,10 @@ informações" → "Executar assim mesmo".
         enquanto a sala está ativa; botão **Cancelar** no Lobby durante isso.
   - [x] SFU do host com STUN público por padrão (`defaultIceServers()`) — a
         mídia também descobre seu endereço de saída sem porta de entrada.
-  - [x] Failover automático **parcado** (dependia de reconexão de host, que o
-        relé v1 não oferece).
+  - [x] Failover automático *disparado por crash* **parcado** (dependia de
+        reconexão de host, que o relé v1 não oferecia). Uma forma mais
+        estreita de reconexão de host — só para uma saída voluntária — foi
+        adicionada depois, na v0.7 abaixo.
 - [x] **Fase 4** — Empacotamento. `npm run dist:win` gera um instalador NSIS
       Windows x64 (`electron-builder.yml`). Sem assinatura de código ainda —
       o Windows SmartScreen avisa no primeiro uso, é esperado.
@@ -223,6 +228,15 @@ informações" → "Executar assim mesmo".
   sem mudar uma linha, só que contra um segredo público — isso remove
   qualquer controle de acesso real à sala, ver
   [Limitações conhecidas #11](#limitações-conhecidas).
+- [x] **v0.7** — Handoff gracioso de host ([docs/DESIGN.md §9.3](docs/DESIGN.md)).
+  Pedido explícito do usuário: sair de propósito não deve mais encerrar a
+  sala para todo mundo. O relé ganhou um frame `HANDOFF` que segura a sala
+  por uma janela de graça (8 s) em vez de derrubá-la no `onClose` do host, e
+  aceita uma reivindicação de host durante essa janela; `RoomSession` nomeia
+  um sucessor (mesma ordem de sempre, `succession.ts`), ele abre uma conexão
+  de host nova e reivindica, os demais reconectam ao socket que já tinham.
+  Continua **não** cobrindo uma queda abrupta (crash) — só a saída
+  voluntária pelo botão "Sair"; ver [Limitações conhecidas #3](#limitações-conhecidas).
 
 ---
 
@@ -239,10 +253,15 @@ as fases avançam.
 2. **A sala depende do relé de sinalização estar no ar.** Mitigado com retry
    de conexão (cobre o cold start do free tier, ~30-50 s) e a opção de rodar
    o seu próprio relé (`server/README.md`).
-3. **Sem failover automático de host.** Se quem hospeda sai ou perde o link
-   com o relé, **a sala termina para todo mundo** — sem promoção de ninguém.
-   Foi implementado e testado (Fase 2), está parcado em `parked/` até o relé
-   suportar reconexão de host ([docs/DESIGN.md §18.5](docs/DESIGN.md)).
+3. **Sem failover automático para uma queda abrupta do host** (trava, perde a
+   rede, o processo morre sem chamar "Sair") — **a sala termina para todo
+   mundo**, sem promoção de ninguém. Essa detecção por crash foi implementada
+   e testada (Fase 2), está parcada em `parked/`
+   ([docs/DESIGN.md §18.5](docs/DESIGN.md)). **Uma saída voluntária é
+   diferente:** clicar em "Sair" enquanto se hospeda faz um handoff
+   gracioso — outro participante assume a mesma sala em segundos, sem que os
+   demais precisem reconectar manualmente — e só cai no comportamento acima
+   se não houver ninguém para assumir ([docs/DESIGN.md §9.3](docs/DESIGN.md)).
 4. **Sem simulcast:** a qualidade de uma transmissão é a mesma para todos os
    seus espectadores, então um espectador com internet ruim pode fazer o
    transmissor baixar a qualidade para todos.

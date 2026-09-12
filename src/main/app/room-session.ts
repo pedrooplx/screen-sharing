@@ -107,6 +107,15 @@ export interface HostOptions {
 export interface JoinOptions {
   readonly nickname: string;
   readonly relayUrl?: string;
+  /**
+   * Not needed to join (peers learn the host's argonParams from hello_ack) -
+   * only kept so that IF this peer is later promoted via a graceful handoff
+   * (RoomSession.#promote), it derives the identical `w` the room's other
+   * participants already agreed on. Production never sets this (it's always
+   * the default either way); tests use it to keep MIN_ARGON_PARAMS in effect
+   * across a simulated promotion.
+   */
+  readonly argonParams?: ArgonParams;
 }
 
 /** What the UI actually calls - see enter() below. */
@@ -123,6 +132,26 @@ export interface EnterOptions {
  *  on a persistently broken relay. */
 const MAX_ENTER_ATTEMPTS = 3;
 
+// #rehome() gets exactly ONE handshake attempt - not several. The relay
+// only ever fires PEER_UP for a survivor once per claim (relay.ts's
+// #claimHandoff), which creates exactly one Connection on the new host's
+// side; runHostHandshake is a strict linear state machine over it
+// (hello -> hello_ack -> pake_peer -> ...). A second `hello` on that same
+// connection - which is exactly what retrying looks like, since every
+// attempt reuses the SAME #peerLink/connId - lands mid-handshake as an
+// unexpected message and either corrupts an already-upgraded connection
+// from an earlier successful-but-presumed-timed-out attempt, or gets the
+// survivor's whole relay socket kicked for a protocol violation (confirmed
+// by hand, the hard way). There is no safe way to retry on this connId; the
+// fix is to not need to. A survivor reacts to host_transfer as soon as it
+// arrives, normally well before the successor has actually finished
+// claiming the room, so REHOME_INITIAL_DELAY_MS waits that race out first -
+// the relay also drops (never forwards) a peer's traffic while a handoff is
+// still pending (relay.ts), so even a too-early attempt fails clean instead
+// of reaching anything half-set-up.
+const REHOME_INITIAL_DELAY_MS = 500;
+const REHOME_HANDSHAKE_TIMEOUT_MS = 6_000;
+
 export class RoomSession extends EventEmitter<RoomSessionEvents> {
   #phase: SessionPhase = 'idle';
   #nickname = '';
@@ -134,6 +163,19 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
   #client: SignalingClient | undefined;
   #media: SfuMediaPlane | undefined;
   #hostLink: RelayHostLink | undefined;
+  /** the peer's own relay transport, kept around (beyond #client) so a
+   *  survivor of a graceful handoff can re-handshake over the SAME socket
+   *  instead of needing a fresh one - see #rehome(). */
+  #peerLink: RelayPeerLink | undefined;
+  /** remembered purely so a later promotion/rehome reuses the same relay and
+   *  Argon2 cost parameters this session originally connected with. */
+  #relayUrl: string | undefined;
+  #argonParams: ArgonParams | undefined;
+  /** true from the moment a host_transfer is being acted on until the
+   *  resulting promotion/rehome settles - guards #wireClient's close/host-lost
+   *  handlers against reacting to a disconnect that IS the handoff, not a
+   *  lost host. */
+  #transferring = false;
   /** set by leave() - lets host()/join() notice they were superseded (e.g. the
    *  user backed out, or started a new attempt) while still waiting out a slow
    *  relay cold-start, and tear down instead of leaving a link dangling. */
@@ -212,6 +254,8 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
 
   async host(opts: HostOptions): Promise<void> {
     this.#nickname = opts.nickname;
+    this.#relayUrl = opts.relayUrl;
+    this.#argonParams = opts.argonParams;
     this.#phase = 'connecting';
     this.#emit();
 
@@ -246,6 +290,8 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
 
   async join(opts: JoinOptions): Promise<void> {
     this.#nickname = opts.nickname;
+    this.#relayUrl = opts.relayUrl;
+    this.#argonParams = opts.argonParams;
     this.#phase = 'connecting';
     this.#emit();
 
@@ -258,6 +304,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       link.close(1000, 'left before joining');
       return;
     }
+    this.#peerLink = link;
 
     const client = new SignalingClient({
       roomId: FIXED_ROOM_ID,
@@ -296,7 +343,7 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     this.#phase = 'left';
     this.#client?.close('leaving');
     if (this.#server) {
-      await this.#server.close().catch(() => {});
+      await this.#handoffOrClose();
     } else {
       await this.#hostLink?.close().catch(() => {});
     }
@@ -304,6 +351,31 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     if (this.#w) wipe(this.#w);
     this.#w = null;
     this.#emit();
+  }
+
+  /**
+   * The user clicked "Sair" while hosting (docs/DESIGN.md section 18.5): if
+   * anyone else is around to take over, hand off gracefully instead of
+   * ending the room for everyone. `hostLink.handoff()` tells the relay to
+   * hold the room open for a successor (server/src/relay.ts); transferHost()
+   * picks that successor, broadcasts it, and closes without kicking
+   * survivors off their own sockets. Anything going wrong here - no
+   * survivors, the relay call failing - just falls back to today's plain
+   * close(), ending the room the way it always has.
+   */
+  async #handoffOrClose(): Promise<void> {
+    const server = this.#server!;
+    const hostLink = this.#hostLink;
+    if (hostLink && server.roster.length > 1) {
+      try {
+        hostLink.handoff();
+        await server.transferHost();
+        return;
+      } catch {
+        /* fall through to a normal close below */
+      }
+    }
+    await server.close().catch(() => {});
   }
 
   snapshot(): SessionSnapshot {
@@ -329,6 +401,9 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     roomId: Uint8Array,
     roomParams: RoomParams,
     argonParams: ArgonParams | undefined,
+    /** a promoted successor keeps its own peerId and continues the epoch
+     *  count instead of starting a brand new identity at epoch 0 */
+    promotion?: { readonly epoch: number; readonly hostPeerId: string },
   ): Promise<void> {
     const lanIp = primaryLanIpv4();
     const media = new SfuMediaPlane({
@@ -350,6 +425,9 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
       source: this.#hostLink!,
       media,
       ...(argonParams ? { argonParams } : {}),
+      ...(promotion
+        ? { epoch: promotion.epoch, hostPeerId: promotion.hostPeerId }
+        : {}),
     });
     // stream_state goes to remote peers AND the host's own renderer
     media.attachBroadcast((body) => {
@@ -403,17 +481,136 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
     client.on('streams', () => this.#emit());
     client.on('media', (body) => this.emit('media', body));
     client.on('host-lost', () => {
+      if (this.#transferring) return; // this IS the handoff, not a lost host
       this.#phase = 'left';
       this.#notice = 'Perdemos contato com o host.';
       this.#emit();
     });
     client.on('close', ({ reason }) => {
-      if (this.#phase === 'left') return; // we already initiated it
+      if (this.#phase === 'left' || this.#transferring) return;
       this.#phase = 'left';
       this.#notice = `A sala encerrou: ${reason}`;
       this.#emit();
     });
     client.on('error', () => this.#emit());
+    client.on('host-transfer', ({ successorPeerId, epoch }) => {
+      this.#onHostTransfer(successorPeerId, epoch);
+    });
+  }
+
+  /**
+   * The current host named a successor before leaving (docs/DESIGN.md
+   * section 18.5). Either this peer IS that successor - promote to host -
+   * or it isn't - stay a peer, but re-handshake over the same relay socket
+   * once the successor's own host link takes over the room.
+   */
+  #onHostTransfer(successorPeerId: string, epoch: number): void {
+    if (this.#leaving || this.#transferring) return;
+    this.#transferring = true;
+    if (successorPeerId === this.#client?.peerId) {
+      void this.#promote(epoch, successorPeerId);
+    } else {
+      void this.#rehome(epoch);
+    }
+  }
+
+  /** Become the new host (docs/DESIGN.md section 18.5). */
+  async #promote(epoch: number, hostPeerId: string): Promise<void> {
+    this.#client?.close('promoted'); // also closes #peerLink - no longer needed
+    this.#client = undefined;
+    this.#peerLink = undefined;
+
+    this.#notice = 'Assumindo como host…';
+    this.#emit();
+
+    try {
+      const argonSalt = deriveArgonSalt(FIXED_ROOM_ID, FIXED_CODE_SALT);
+      this.#w = derivePasswordKey(FIXED_PASSWORD, argonSalt, this.#argonParams);
+      wipe(argonSalt);
+
+      const url = resolveRelayUrl(this.#relayUrl);
+      const link = await openWithRetry(() =>
+        RelayHostLink.open(url, FIXED_ROOM_ID_HEX, APP_VERSION),
+      );
+      if (this.#leaving) {
+        await link.close().catch(() => {});
+        return;
+      }
+      this.#hostLink = link;
+
+      await this.#startServer(FIXED_ROOM_ID, this.#roomParams, this.#argonParams, {
+        epoch,
+        hostPeerId,
+      });
+      if (this.#leaving) {
+        await this.#server?.close().catch(() => {});
+        return;
+      }
+
+      this.#transferring = false;
+      this.#phase = 'hosting';
+      this.#notice = null;
+      this.#emit();
+    } catch (err) {
+      this.#transferring = false;
+      this.#phase = 'left';
+      this.#notice = `A sala encerrou: não foi possível assumir como host (${(err as Error).message}).`;
+      this.#emit();
+    }
+  }
+
+  /**
+   * Stay a peer, but re-home to whoever just claimed the host slot - over
+   * the SAME relay transport (#peerLink), never closed during a graceful
+   * handoff specifically so this can happen without dialing the relay
+   * again. Exactly one handshake attempt - see REHOME_INITIAL_DELAY_MS
+   * above for why.
+   */
+  async #rehome(epoch: number): Promise<void> {
+    const link = this.#peerLink;
+    this.#client?.detach(); // stop its heartbeat; the transport lives on
+    this.#client = undefined;
+    if (!link) {
+      this.#roomEndedAfterFailedHandoff('conexão com o relé perdida');
+      return;
+    }
+
+    this.#notice = 'Trocando de host…';
+    this.#emit();
+    await new Promise((r) => setTimeout(r, REHOME_INITIAL_DELAY_MS));
+    if (this.#leaving) return;
+
+    try {
+      const client = new SignalingClient({
+        roomId: FIXED_ROOM_ID,
+        secret: { password: FIXED_PASSWORD, codeSalt: FIXED_CODE_SALT },
+        nickname: this.#nickname,
+        transport: link,
+        minEpoch: epoch,
+        handshakeTimeoutMs: REHOME_HANDSHAKE_TIMEOUT_MS,
+      });
+      this.#client = client;
+      this.#wireClient(client);
+
+      const joined = await client.connect();
+      if (this.#leaving) return;
+      this.#roomParams = joined.roomParams;
+      this.#transferring = false;
+      this.#phase = 'in-room';
+      this.#notice = null;
+      this.#emit();
+    } catch {
+      if (this.#leaving) return;
+      this.#client = undefined;
+      this.#roomEndedAfterFailedHandoff('o novo host não respondeu a tempo');
+    }
+  }
+
+  #roomEndedAfterFailedHandoff(reason: string): void {
+    this.#transferring = false;
+    this.#phase = 'left';
+    this.#notice = `A sala encerrou: ${reason}.`;
+    this.#emit();
   }
 
   #emit(): void {

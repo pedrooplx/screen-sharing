@@ -17,6 +17,7 @@ export const T = {
   PEER_DOWN: 0x05,
   HOST_GONE: 0x06,
   KICK: 0x07,
+  HANDOFF: 0x08,
   DATA_H: 0x10,
   DATA_P: 0x11,
   PING: 0x20,
@@ -139,3 +140,5 @@ export function encodeKick(connId: number): Buffer {
 }
 
 export const encodePing = (): Buffer => Buffer.from([T.PING]);
+/** host -> relay: "I'm leaving gracefully, hold this room for a successor" */
+export const encodeHandoff = (): Buffer => Buffer.from([T.HANDOFF]);

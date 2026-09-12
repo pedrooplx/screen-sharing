@@ -104,4 +104,11 @@ describe('wire compat: server/src/wire.ts <-> src/main/net/relay-wire.ts', () =>
   it('PING is a single byte on both sides', () => {
     expect(clientWire.encodePing()).toEqual(Buffer.from([serverWire.T.PING]));
   });
+
+  it('client HANDOFF decodes on the server', () => {
+    const buf = clientWire.encodeHandoff();
+    expect(buf).toEqual(Buffer.from([serverWire.T.HANDOFF]));
+    expect(serverWire.isHandoff(buf)).toBe(true);
+    expect(serverWire.isHandoff(clientWire.encodePing())).toBe(false);
+  });
 });

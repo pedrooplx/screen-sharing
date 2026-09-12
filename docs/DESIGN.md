@@ -43,11 +43,22 @@
 **Fases 0-3 concluídas na arquitetura original (serverless); depois disso, a
 sinalização foi migrada para um relé hospedado (v0.4, §18) por pedido
 explícito do usuário — o atrito de "abrir porta no roteador" era grande demais.
-Consequência: o failover automático de host (Fase 2) foi PARCADO (código
+Consequência: o failover automático de host *disparado por crash* (Fase 2,
+detecção por heartbeat + `heir_probe` UDP anti-split-brain) foi PARCADO (código
 mantido em `parked/`, fora do build) porque o modelo de relé v1 não tem
 reconexão do host; ver §18.5.**
 
-**O que já existe e passa nos testes** (`npm test` → 150 testes, 18 arquivos;
+**Revivido em v0.7, mas mais estreito: o handoff gracioso na saída voluntária
+do host** (§9.3, §18.5). Quando quem hospeda clica em "Sair" e há alguém mais
+na sala, o relé guarda a sala por uma janela de graça (`HANDOFF`, 8 s) em vez
+de encerrá-la na hora, o sucessor (`succession.ts`, mesma ordem de sempre)
+assume a mesma identidade fixa da sala, e os demais reconectam ao socket que
+já tinham — sem trocar de tela, só uma notificação breve. Isto **não** é o
+mesmo mecanismo da Fase 2: não há detecção de crash, não há `heir_probe`,
+não há proteção contra split-brain — se o host trava ou perde a rede sem
+chamar `leave()`, a sala ainda termina para todo mundo, exatamente como antes.
+
+**O que já existe e passa nos testes** (`npm test` → 162 testes, 18 arquivos;
 `npm run typecheck` limpo — Node + web + `server/`; `npm audit` → 0
 vulnerabilidades em ambos os `package.json`):
 
@@ -131,7 +142,7 @@ UDP, sem mídia). TURN é apenas ponto de extensão opcional.
 > a mídia continua 100% P2P. `server/` documenta como rodar seu próprio relé
 > se preferir não depender do público.
 
-**No escopo:** captura de tela inteira ou janela + áudio do sistema; múltiplos transmissores; assinatura seletiva de fluxos; autenticação por código + senha. **Failover automático de host** estava no escopo original (Fase 2, implementado) mas está **parcado** desde o pivô do relé — §18.5.
+**No escopo:** captura de tela inteira ou janela + áudio do sistema; múltiplos transmissores; assinatura seletiva de fluxos; autenticação por código + senha. **Failover automático de host disparado por crash** estava no escopo original (Fase 2, implementado) mas está **parcado** desde o pivô do relé — §18.5. **Handoff gracioso numa saída voluntária** foi revivido em v0.7, mais estreito — §9.3.
 
 **Fora do escopo nesta rodada:** microfone, webcam, gravação, chat com UI, auto-update, macOS/Linux.
 
@@ -309,14 +320,16 @@ stateDiagram-v2
         concorrentes, nao exclusivos
     end note
 
-    in_room --> left: sair, ou o host/relé caiu (sem failover - §18.5)
+    in_room --> left: sair, ou o host/relé caiu sem sucessor (crash - sem failover automático, §18.5)
+    in_room --> hosting: o host saiu de propósito e me nomeou sucessor (handoff gracioso, §9.3)
+    in_room --> in_room: o host saiu de propósito, sobrevivo reconectando ao sucessor (handoff gracioso, §9.3)
     hosting --> left: sair (ou o link com o relé caiu)
     left --> [*]
 ```
 
 `transmitting` e `viewing` são flags sobre `in_room`, não estados exclusivos: dá para transmitir e assistir ao mesmo tempo. `waking` existe só para dar feedback visual durante um cold start do relé free-tier (§18.4) — não é um estado de erro.
 
-> **Mapeamento para o código:** `connecting`/`waking` = `RoomSession.host()`/`.join()` chamando `openWithRetry(RelayHostLink.open | RelayPeerLink.open)`, então `SignalingClient.connect()` + `runPeerHandshake` do lado peer; `in_room` = pós-`joined`; `hosting` = `RoomSession` com um `SignalingServer` ativo. `transmitting`/`viewing` vêm de `useMedia()` no renderer. **Não existe mais** `reconnecting`/`host_promotion`: eram do failover automático, parcado em §18.5 — hoje qualquer queda do host ou do relé leva direto a `left`, com uma `notice` explicando por quê.
+> **Mapeamento para o código:** `connecting`/`waking` = `RoomSession.host()`/`.join()` chamando `openWithRetry(RelayHostLink.open | RelayPeerLink.open)`, então `SignalingClient.connect()` + `runPeerHandshake` do lado peer; `in_room` = pós-`joined`; `hosting` = `RoomSession` com um `SignalingServer` ativo. `transmitting`/`viewing` vêm de `useMedia()` no renderer. **Não existe** `reconnecting`/`host_promotion` como estados visíveis — a Fase 2 auto-failover (crash-triggered, com `heir_probe`) que os usava continua parcada (§18.5): uma queda abrupta do host ou do relé ainda leva direto a `left`, com uma `notice` explicando por quê. O que existe desde §9.3 é mais estreito: uma saída *voluntária* do host (`leave()`, não um crash) tenta um handoff gracioso primeiro, e só cai em `left` para os sobreviventes se ele falhar (ninguém para assumir, ou o sucessor não responde a tempo) - por isso as duas novas transições ficam em `in_room`, não substituem a de `left`.
 
 ---
 
@@ -352,9 +365,10 @@ funcionaria contra qualquer instalação. Argon2id continua caro (64 MiB,
 t=3) e a senha continua sendo o único segredo — um trade aceitável para uma
 ferramenta privada de grupo pequeno, não um serviço multi-tenant público.
 
-Como não há mais failover automático (§18.5) nem código para expirar, a sala
-só para de existir quando o host sai ou o link dele com o relé cai — quem
-quiser hospedar de novo depois disso reabre a mesma identidade fixa.
+Sem código para expirar, a sala só para de existir de fato quando o host sai
+sem que ninguém assuma (§9.3), ou o link dele com o relé cai sem aviso (crash -
+sem failover automático para esse caso, §18.5) — quem quiser hospedar de novo
+depois disso reabre a mesma identidade fixa.
 
 ---
 
@@ -493,13 +507,19 @@ Estas mensagens estão só esboçadas; nenhuma está nos schemas `zod` nem no se
 
 ### 7.4 Liveness e failover
 
-> `ping`/`pong` estão **ativos**. `host_transfer` está implementado em `SignalingServer.transferHost()` mas **nada o chama** hoje (era acionado pelo desligamento gracioso do `PeerNode`, parcado - §18.5); ele continua no schema porque o mecanismo é barato de manter e volta a fazer sentido se o failover for revivido. `heir_probe`/`heir_probe_reply` — protocolo UDP separado, `parked/heir-probe.ts` — está **parcado** junto com o resto do failover.
+> `ping`/`pong` estão **ativos**. `host_transfer` está **ativo desde v0.7**
+> (§9.3): `RoomSession#handoffOrClose()` chama `SignalingServer.transferHost()`
+> quando o host sai de propósito e há sobreviventes. `heir_probe`/
+> `heir_probe_reply` — protocolo UDP separado, `parked/heir-probe.ts` —
+> continua **parcado** junto com a detecção de crash da Fase 2 (§9.1/9.2,
+> §18.5); não é necessário para o handoff gracioso, que não tem split-brain
+> para evitar.
 
 | mecanismo | onde | Papel |
 |---|---|---|
-| `ping` / `pong` | envelope; `heartbeat.ts` | a cada 2 s; 3 perdidos ⇒ "host-lost" (peer) / a sala termina (host via `RoomSession`, sem promoção) |
-| `host_transfer` | envelope | **dormente** - saída graciosa: `{successorPeerId, epoch}`; nada chama `transferHost()` hoje |
-| `heir_probe` / `heir_probe_reply` | **UDP**, `parked/heir-probe.ts` | **parcado** - peer → herdeiro: "seu link com o host está vivo?" |
+| `ping` / `pong` | envelope; `heartbeat.ts` | a cada 2 s; 3 perdidos ⇒ "host-lost" (peer) / a sala termina (host via `RoomSession`, sem promoção) - só se aplica a uma queda abrupta, não a um `leave()` |
+| `host_transfer` | envelope | **ativo** (§9.3) - saída graciosa: `{successorPeerId, epoch}`; `transferHost()` é chamado por `RoomSession#handoffOrClose()` |
+| `heir_probe` / `heir_probe_reply` | **UDP**, `parked/heir-probe.ts` | **parcado** - peer → herdeiro: "seu link com o host está vivo?" (só faria falta para o failover disparado por crash, §18.5) |
 | `bye` | envelope | saída limpa, com motivo |
 
 **Não implementados** e por quê (registro histórico, da época em que o failover era o plano):
@@ -627,17 +647,27 @@ O host manda `quality_directive`; o transmissor aplica com `setParameters({encod
 
 ---
 
-## 9. Failover de host — PARCADO (§18.5)
+## 9. Failover de host — parcialmente revivido em v0.7 (§9.3, §18.5)
 
-> **Todo este §9 descreve um mecanismo parcado.** Foi implementado e testado
-> na Fase 2 (`parked/{peer-node,failover,heir-probe}.ts`,
+> **§9.1 e §9.2 abaixo descrevem o mecanismo da Fase 2, que continua
+> PARCADO.** Foi implementado e testado na Fase 2
+> (`parked/{peer-node,failover,heir-probe}.ts`,
 > `src/main/election/succession.ts`), e funcionava. Ficou parcado quando a
-> sinalização migrou para o relé (v0.4): o relé v1 não tem conceito de
-> "reconectar como o mesmo host" — se o WebSocket do host cai, o relé encerra
-> a sala e avisa todo mundo (`HOST_GONE`), ponto. Reviver isto exigiria mudar
-> o **relé**, não só o cliente — ver §18.5 para o que seria necessário. O
-> texto abaixo é preservado porque a lógica (ordem de sucessão, `epoch`,
-> `heir_probe` anti-split-brain) continua correta e reaproveitável.
+> sinalização migrou para o relé (v0.4): o relé v1 não tinha conceito de
+> "reconectar como o mesmo host" — se o WebSocket do host caísse, o relé
+> encerrava a sala e avisava todo mundo (`HOST_GONE`), ponto. O texto de §9.1
+> e §9.2 é preservado porque a lógica de ordem de sucessão continua correta e
+> reaproveitável, mas a **detecção por crash/heartbeat e o anti-split-brain
+> via `heir_probe` não existem sobre o relé hoje** — reviver isso ainda
+> exigiria as mudanças descritas em §18.5.
+>
+> **§9.3 é diferente: já está implementado, sobre o relé, em produção.**
+> Cobre só o caso de saída *voluntária* (`RoomSession.leave()` chamado pelo
+> host) — não crash, não perda de link. `succession.ts` (a ordem determinística
+> de §9.1) é reaproveitado tal qual; `heir_probe` e a detecção por heartbeat
+> não são necessários porque não há split-brain para evitar: só existe um
+> host de cada vez tentando sair, de propósito, e ele mesmo coordena a
+> transição antes de desaparecer.
 
 ### 9.1 Ordem de sucessão (determinística, calculável por todos)
 
@@ -687,7 +717,7 @@ O `heir_probe` evita split-brain: um peer isolado pergunta ao herdeiro e, se ele
 
 **`epoch` resolve o resto.** Contador monotônico incrementado em cada promoção, carregado no `joined`. O `SignalingClient` rejeita um `joined` com `epoch` abaixo do esperado (`minEpoch`), então um host antigo que volte do limbo não consegue readotar ninguém. Sem consenso, sem quórum — o custo é aceitar que uma partição de rede pode gerar duas salas.
 
-**Saída graciosa** (`SignalingServer.transferHost()`): nomeia o melhor sucessor, faz broadcast de `host_transfer{successorPeerId, epoch}`, dá `graceMs` (~1,5 s) e fecha. O peer nomeado promove direto; os outros fazem `connect-heir`. Sem esperar timeout de heartbeat.
+**Saída graciosa nesta Fase 2 (parcada):** `SignalingServer.transferHost()` nomeava o melhor sucessor, fazia broadcast de `host_transfer{successorPeerId, epoch}`, dava `graceMs` (~1,5 s) e fechava; o peer nomeado promovia direto, os outros faziam `connect-heir`. **`transferHost()` é o mesmo método que §9.3 reaproveita sobre o relé** — só o que vem depois dele (`close()` vs. a nova `#closeForHandoff()`, e como cada sobrevivente reage) mudou.
 
 **Estado transferido:** roster, parâmetros da sala, `epoch` (no `joined`). As chaves são recalculadas de `w`. **Nenhum segredo trafega no failover.**
 
@@ -696,6 +726,93 @@ O `heir_probe` evita split-brain: um peer isolado pergunta ao herdeiro e, se ele
 **Se ninguém consegue ser host:** a sala encerra com mensagem explícita ("nenhum participante consegue aceitar conexões; peça a alguém para configurar port forwarding ou um TURN"). Consideramos degradar para malha pura: com 12 pessoas isso é O(N²) de encoders no transmissor (11 encodes 1080p por pessoa transmitindo), o que é pior que encerrar. **Escolha registrada: encerrar, não degradar.** Malha só faria sentido para 2–3 pessoas, e nesse caso o problema de host provavelmente também não existiria.
 
 Meta de tempo: **< 10 s** do crash à mídia voltando (6 s de detecção + ~1 s de promoção + reconexão). A decisão 4 aceita "poucos segundos".
+
+### 9.3 Handoff gracioso sobre o relé — IMPLEMENTADO (v0.7)
+
+> Pedido do usuário: *"quando o host está saindo a sala está caindo, quero
+> que a sala continue de pé"*, com o escopo explicitamente escolhido como
+> "failover sem interrupção (projeto grande)" — mudar o relé, não só o
+> cliente. Ao contrário de §9.1/9.2, isto **não** cobre crash: só uma saída
+> voluntária (`RoomSession.leave()` chamado enquanto se é host).
+
+**Relé (`server/src/relay.ts`).** `Room.handoffDeadline` marca uma sala
+"pendente" por `HANDOFF_GRACE_MS` (8 s) a partir de um novo frame
+`HANDOFF` (`0x08`) enviado pelo host que está saindo. Enquanto pendente:
+
+- um novo HELLO de host para o mesmo `roomId` **reivindica** a sala
+  (`#claimHandoff`) em vez de receber `room_exists` — reatribui `room.host`,
+  gera um `hostToken` novo, e reenvia `PEER_UP` para cada peer ainda
+  conectado, exatamente como se tivessem acabado de discar;
+- tráfego peer→host é **descartado silenciosamente** (protege contra um
+  sobrevivente que tenta cedo demais e cairia no `Connection` já-cifrado do
+  host antigo, que ainda está tecnicamente conectado até seu próprio `close`
+  ou o fim da janela);
+- o `onClose` do host antigo **não** derruba a sala nem os peers enquanto
+  pendente;
+- `sweep()` (agora a cada 2 s, não 60 s - `server/src/index.ts`) encerra a
+  sala do jeito de sempre (`HOST_GONE` + fecha peers) se a janela expirar sem
+  ninguém reivindicar.
+
+**Cliente (`src/main/app/room-session.ts`).** `leave()` chama
+`#handoffOrClose()`: se há alguém no roster além de quem está saindo, manda
+`HANDOFF` ao relé e chama `SignalingServer.transferHost()` (nomeia o sucessor
+por `succession.ts`, já existente - o mesmo de §9.1 -, broadcast de
+`host_transfer{successorPeerId, epoch}`, espera `graceMs`, depois
+`#closeForHandoff()`: fecha o próprio link **sem** chacoalhar cada peer
+individualmente - ao contrário de `close()`, isso nunca vira um `KICK`, que
+no relé mataria o socket do peer para sempre). Qualquer coisa que falhe aqui
+(sem sobreviventes, a chamada ao relé falhando) cai de volta no `close()` de
+sempre.
+
+Cada sobrevivente recebe `host_transfer` na conexão que já tinha e reage:
+
+- **o sucessor nomeado** (`#promote`): fecha sua própria conexão de peer
+  antiga, abre um `RelayHostLink` novo (reusa `openWithRetry` - um
+  `room_exists` genuíno não é retentável, mas ganhar a reivindicação é rápido
+  o bastante para não precisar de retry mesmo assim), sobe um
+  `SignalingServer` novo preservando seu próprio `peerId` e continuando
+  `epoch + 1`;
+- **todo mundo mais** (`#rehome`): reaproveita a conexão que já tinha com o
+  relé (`RelayPeerLink` - nunca é fechada num handoff gracioso justamente
+  para isto funcionar), espera `REHOME_INITIAL_DELAY_MS` (500 ms, tempo de
+  sobra para a reivindicação do sucessor - uma operação rápida, majoritariamente
+  local - já ter terminado), e faz **exatamente uma** tentativa de handshake
+  nova, não um loop de retry: a reivindicação do relé dispara `PEER_UP`
+  **uma vez** por sobrevivente, criando **um** `Connection` do lado do host
+  novo, cuja máquina de estados (`hello → hello_ack → pake_peer → ...`) é
+  estritamente linear - um segundo `hello` no mesmo `connId` corromperia ou
+  derrubaria essa `Connection`, não teria uma segunda chance. `#phase`
+  deliberadamente **não** sai de `in_room` durante isso (só `notice` muda,
+  "Trocando de host…") para a UI não saltar pra Lobby no meio do caminho.
+
+**`#phase` só chega em `left` para um sobrevivente** se o handoff falhar de
+verdade (ninguém para assumir, ou o sucessor não responde dentro de
+`REHOME_HANDSHAKE_TIMEOUT_MS`/6 s) - o mesmo desfecho de sempre, só que agora
+como fallback em vez de única opção.
+
+**Mídia:** nenhuma mudança fez falta. `useMedia(streams, epoch)` (§9.2) já
+reagia a um bump de `epoch` fechando e reabrindo os `RTCPeerConnection`s; um
+handoff gracioso bate exatamente nesse mecanismo.
+
+**Trade-off aceito, não corrigido: a janela de reivindicação não verifica
+quem está reivindicando.** `#claimHandoff` aceita o primeiro HELLO de host
+que chegar para aquele `roomId` durante os 8 s - não confere se é realmente
+o `successorPeerId` anunciado em `host_transfer`. Num mundo com senha por
+sala isso não seria um problema sério (quem reivindica ainda precisa
+completar o CPace com a senha certa para qualquer peer lhe falar algo que
+importe); mas a sala é única, fixa, e **sem senha** (§5, decisão já tomada e
+aceita pelo usuário) - então, em teoria, qualquer processo que já saiba o
+`FIXED_ROOM_ID` e vença a corrida durante essa janela ocupa o papel de host
+no lugar do sucessor real. O peer legítimo perde a reivindicação e a sala
+acaba encerrando (via timeout do `#rehome`) em vez de sobreviver - **o pior
+caso é idêntico ao comportamento de antes desta feature** (a sala termina),
+não um novo jeito de expor conteúdo (CPace continua garantindo que um host
+impostor não aprende a senha nem lê nada que um peer real mande). Corrigir
+isso de verdade exigiria o relé transportar um "ticket" de reivindicação de
+uso único do `HANDOFF` até o `host_transfer` e de volta - mudança de
+protocolo maior, não feita porque o pior caso já é aceitável dado que a sala
+não tem controle de acesso mesmo. Ver §10 para o mesmo trade-off no modelo de
+ameaça.
 
 ---
 
@@ -714,7 +831,9 @@ Meta de tempo: **< 10 s** do crash à mídia voltando (6 s de detecção + ~1 s 
 
 **Aceito e documentado, v1:** o host vê a mídia em claro. É aceitável porque (a) o host é um participante confiável do grupo, (b) o material que ele vê é justamente o que está sendo compartilhado com o grupo, e (c) o papel de host é escolhido por quem cria a sala. Quem não aceitar isso: §8.4 descreve o caminho de E2EE, e o flag existe.
 
-**Aceito e documentado (v0.4):** confiar num relé hospedado para a sinalização, mesmo que ele só veja metadados. Mitigado por: (1) o relé nunca vê nada que importe em claro — é o mesmo desenho de "rede hostil" que já valia para o ISP; (2) `server/README.md` documenta como rodar o seu próprio relé, para quem não quiser depender do público; (3) sem failover automático (§18.5), a superfície de "o relé decide quem é o host" nem existe — o relé só sabe qual socket chegou primeiro com HELLO `role:'host'`.
+**Aceito e documentado (v0.4):** confiar num relé hospedado para a sinalização, mesmo que ele só veja metadados. Mitigado por: (1) o relé nunca vê nada que importe em claro — é o mesmo desenho de "rede hostil" que já valia para o ISP; (2) `server/README.md` documenta como rodar o seu próprio relé, para quem não quiser depender do público; (3) fora da janela de handoff (§9.3), "o relé decide quem é o host" nem existe como superfície — ele só sabe qual socket chegou primeiro com HELLO `role:'host'`, e um segundo HELLO para a mesma sala é rejeitado (`room_exists`) sem exceção.
+
+**Aceito e documentado (v0.7, §9.3):** durante os ~8 s de uma saída graciosa do host, a sala fica com a identidade "em aberto" — o relé aceita o primeiro HELLO de host que chegar como a reivindicação, sem confirmar que é de fato o sucessor eleito. Como a sala é única, fixa e sem senha (§5), isso é teoricamente vencível por qualquer processo que já saiba o `roomId` fixo do app. Mitigado por: (1) o pior caso (perder a corrida) é idêntico ao que já acontecia antes desta feature — a sala termina, ninguém assume; (2) CPace continua correndo por cima — um host impostor nunca aprende a senha nem lê nada que um peer real mande, mesmo tendo "ganho" o papel; (3) é uma janela curta e rara (só existe entre um `leave()` voluntário e o fim do handoff), não uma superfície permanente.
 
 **Aceito e documentado:** entrar na sala revela seu IP externo aos outros participantes (inerente ao P2P — TURN esconderia isso do resto, à custa de um relay de mídia). E a senha é tão forte quanto o grupo a escolheu: a UI vai medir e exigir um mínimo, e vai oferecer geração de senha aleatória.
 
@@ -819,7 +938,7 @@ Cada item aqui vira uma linha na seção "Limitações conhecidas" do README (Fa
 7. ~~Sem UPnP e sem port forwarding manual → não pode ser host.~~ **Não se aplica mais desde v0.4**, pelo mesmo motivo. `parked/nat-mapping.ts` e o botão "Tentar abrir a porta de novo" ficaram sem uso.
 8. **A sala depende do relé hospedado estar no ar** (novo em v0.4, §18). Mitigado com retry de conexão (~75 s de orçamento, cobre o cold start do free tier) e keep-alive enquanto a sala está ativa; documentado como rodar o seu próprio relé (`server/README.md`).
 9. **O relé free-tier (Render) dorme após ~15 min sem uso e leva 30-50 s para acordar.** A primeira conexão de uma sala inativa há um tempo mostra "acordando o servidor…" em vez de conectar na hora. Ver §18.4.
-10. **Sem failover automático de host** (era o item "após failover, o código antigo deixa de funcionar" até a Fase 2 — agora a situação é mais simples e mais dura: **se o host sai ou perde o link com o relé, a sala termina** para todo mundo, sem promoção de ninguém. Implementado e testado até v0.3 (`parked/`), parcado em v0.4 — ver §18.5 para o que falta pra reviver.
+10. **Sem failover automático de host para uma queda abrupta:** se o host trava, perde a rede, ou o processo morre sem chamar `leave()`, a sala termina para todo mundo, sem promoção de ninguém (Fase 2 cobria isso via crash-detection + `heir_probe`; ficou parcada em v0.4 — ver §18.5). **Diferente desde v0.7:** uma saída *voluntária* (clicar "Sair" enquanto se é host) tenta um handoff gracioso primeiro — a sala continua de pé com outro host, e só cai no comportamento acima se não houver ninguém para assumir ou o handoff falhar (§9.3).
 11. **Sem simulcast:** um espectador com internet ruim faz o transmissor baixar a qualidade para todos.
 12. Host vê a mídia em claro (§10).
 13. O primeiro uso dispara o alerta do Firewall do Windows; sem aceitar, ninguém conecta — isto vale pro **transporte de mídia** (a sinalização não precisa mais de regra de firewall de entrada nenhuma, já que só faz conexões de saída).
@@ -955,7 +1074,9 @@ Perguntado explicitamente, o usuário escolheu:
 - **Manter CPace (a autenticação por senha) através do relé.** O relé é
   tratado como untrusted — só encaminha bytes (§18.2, §10).
 - **Não** manter o failover automático do peer-SFU no relé v1 (não foi
-  selecionado). Ver §18.5.
+  selecionado). Ver §18.5. *(Revisitado em v0.7 só para a saída voluntária -
+  §9.3 - por um pedido posterior explícito do usuário; a detecção por crash
+  descrita aqui e em §18.5 continua fora de escopo.)*
 - **Não** foi pedido explicitamente um keep-alive anti-sleep no menu de
   opções, mas o pedido em prosa ("a aplicação deve ser ajustada") cobre isso:
   implementado como retry de conexão + ping de manutenção (§18.4).
@@ -1026,6 +1147,7 @@ um deployable standalone sem puxar Electron/werift/etc. `test/relay/wire-compat.
 0x05 PEER_DOWN  rele->host,   JSON {connId}
 0x06 HOST_GONE  rele->peer (fecha em seguida)
 0x07 KICK       host->rele:   [connId u32 BE]                       (derruba 1 peer)
+0x08 HANDOFF    host->rele:   sem corpo (segura a sala por HANDOFF_GRACE_MS p/ handoff gracioso, §9.3)
 0x10 DATA_H     host<->rele:  [connId u32 BE][isBinary u8][payload] (por peer)
 0x11 DATA_P     peer<->rele:  [isBinary u8][payload]                (peer só tem 1 canal: o host)
 0x20 PING / 0x21 PONG   qualquer direção, sem corpo (keep-alive)
@@ -1048,10 +1170,15 @@ contra abuso, não autenticação (quem autentica é o CPace, por cima).
 `rate_limited`/`server_full`/qualquer falha de conexão (relé dormindo, rede)
 são a razão de existir o retry do §18.4.
 
-**Decisão de design: sem graça de reconexão do host no v1.** Se o WS do host
-cai, `onClose` já derruba a sala na hora (`HOST_GONE` + delete). Simples,
-honesto, e é exatamente a peça que teria que mudar para reviver o failover
-(§18.5).
+**Decisão de design original (v1): sem graça de reconexão do host.** Se o WS
+do host cai, `onClose` derrubava a sala na hora (`HOST_GONE` + delete).
+Simples, honesto — e continua sendo exatamente isso para uma queda **abrupta**
+hoje (crash, rede caindo): não há graça para esse caso, só para uma saída
+voluntária. **Desde v0.7 (§9.3), há uma exceção deliberada e estreita:** um
+frame `HANDOFF` explícito, mandado pelo host *antes* de fechar seu próprio
+WS, marca a sala como pendente por `HANDOFF_GRACE_MS` — só nessa janela,
+iniciada pelo próprio host, `onClose` deixa de derrubar a sala na hora. Sem o
+`HANDOFF`, o comportamento de sempre se aplica sem excecão.
 
 ### 18.4 Cold start, keep-alive, config, e a identidade da sala
 
@@ -1089,34 +1216,59 @@ um relé próprio.
 constantes fixas na v0.5 (sala única, sem código), porque o endereço já era
 sempre o mesmo `relayUrl` para todo mundo desde o pivô do relé.
 
-### 18.5 O que falta para reviver o failover automático
+### 18.5 O que foi revivido (v0.7) e o que ainda falta
 
-O relé v1 encerra a sala no instante em que o WS do host cai (§18.3) - não há
-como um peer "assumir" porque o relé nem sabe que existe um candidato. Para
-reviver o mecanismo de `parked/` (que continua correto e testado) sobre o
-relé, seria preciso mudar o **relé**, não só o cliente:
+**Implementado sobre o relé (§9.3):** o handoff gracioso para uma saída
+*voluntária* do host. Dos quatro itens que esta seção listava como
+necessários para reviver o failover, os dois primeiros foram feitos - só que
+de forma mais simples do que se previa aqui, porque o gatilho é o próprio
+host saindo de propósito, não um crash detectado de fora:
 
-1. O relé guardaria a sala por uma janela de graça em vez de derrubá-la na
-   hora do `onClose` do host (`hostToken`, já emitido no `READY` do host mas
-   hoje sem uso, é o candidato natural para "prove que você é quem deveria
-   assumir" ou para um host que reconecta rápido o suficiente reclamar a
-   mesma sala).
-2. Precisaria de um jeito de **promover um peer a host** dentro da mesma sala
-   do relé - hoje os papéis são fixos no HELLO (`role: 'host' | 'peer'`); o
-   relé teria que aceitar uma mensagem tipo "eu sou o novo host desta sala"
-   vinda de um peer já conectado, reatribuir esse socket, e re-anunciar
-   `PEER_UP`/HELLO info pros sobreviventes.
-3. A ordem de sucessão (`succession.ts`) e o anti-split-brain (`heir_probe`)
-   continuam fazendo sentido - mas `heir_probe` era UDP direto entre peers
-   (`IP:porta`), que não existe mais nesse mundo; teria que virar mais uma
-   mensagem roteada pelo relé.
-4. `RoomSession` voltaria a precisar de algo como `PeerNode` para coordenar
-   isso do lado do cliente - o código em `parked/peer-node.ts` é o ponto de
-   partida, mas precisa ser reescrito para falar com `RelayPeerLink` em vez
-   de abrir seus próprios sockets.
+1. ✅ **O relé guarda a sala por uma janela de graça** em vez de derrubá-la na
+   hora do `onClose` do host - mas via um frame `HANDOFF` explícito que o
+   host manda *antes* de fechar (`Room.handoffDeadline`,
+   `HANDOFF_GRACE_MS` = 8 s), não por adivinhar a intenção a partir do
+   `hostToken`. Um host que só cai (sem mandar `HANDOFF`) continua sem graça
+   nenhuma - item ainda não coberto, ver abaixo.
+2. ✅ **Promover um peer a host dentro da mesma sala do relé** - mas não via
+   uma mensagem "eu sou o novo host" vinda de um peer já conectado; o
+   sucessor abre uma conexão de host *nova* (`RelayHostLink.open()`) e o
+   relé trata um HELLO de host que chega durante a janela como uma
+   reivindicação (`#claimHandoff`), reatribuindo `room.host` e reemitindo
+   `PEER_UP` pros sobreviventes. Mais simples que "promover o socket de peer
+   existente" porque reaproveita o caminho de conexão de host que já existia.
+3. ⚠️ **Ordem de sucessão:** reaproveitada tal qual (`succession.ts`, sem
+   mudar uma linha). **Anti-split-brain via `heir_probe`: não foi necessário**
+   e continua parcado - não existe split-brain para evitar quando só um
+   processo (o host que está de fato saindo) pode iniciar um handoff, e ele
+   mesmo coordena a transição antes de desaparecer.
+4. ✅ **Coordenação do lado do cliente:** não precisou de um `PeerNode` novo -
+   `RoomSession` ganhou `#promote()`/`#rehome()` diretamente, reaproveitando
+   `RelayPeerLink`/`RelayHostLink` que já existiam.
 
-Nenhum destes é implementado. `parked/README.md` tem a versão curta desta
-lista.
+**Ainda não implementado - o que falta para o caso de crash (a Fase 2
+original, §9.1/9.2):**
+
+- **Detecção de que o host caiu sem avisar.** Hoje isso só existe do lado do
+  peer (heartbeat → `host-lost` → sala termina, sem promoção). Reviver a
+  Fase 2 exigiria o relé (ou os peers) notarem a queda e iniciarem uma
+  eleição sem que ninguém tenha mandado `HANDOFF` - o problema original
+  que esta seção descrevia, ainda sem solução.
+- **Anti-split-brain para esse caso.** Sem um host coordenando a própria
+  saída, mais de um peer pode achar que deveria assumir; `heir_probe`
+  (UDP direto, `parked/heir-probe.ts`) resolvia isso quando existia rede
+  P2P entre peers para a sinalização - sobre o relé, teria que virar uma
+  mensagem roteada por ele, item 3 de antes, ainda não feito.
+- **A janela de reivindicação não verifica identidade** (§9.3, trade-off
+  documentado): funciona para o handoff gracioso porque o pior caso
+  (perder a corrida) é idêntico ao de nunca ter esta feature. Uma promoção
+  disparada por crash, sem o host coordenando nada, precisaria de um jeito
+  melhor de provar "eu sou o sucessor legítimo" antes de reivindicar - por
+  exemplo, um ticket de uso único emitido no momento da eleição, não só "o
+  primeiro HELLO que chegar".
+
+`parked/README.md` tem a versão curta desta lista, ainda válida para o que
+não foi feito.
 
 ### 18.6 Pendências conhecidas deste pivô
 

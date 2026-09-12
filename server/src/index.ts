@@ -33,7 +33,12 @@ export async function createRelayHttpServer(
   opts: { readonly port?: number; readonly limits?: RelayLimits } = {},
 ): Promise<RelayHttpServer> {
   const relay = new Relay(opts.limits ?? DEFAULT_LIMITS);
-  const sweeper = setInterval(() => relay.sweep(), 60_000);
+  // 2s, not 60s: sweep() also expires an abandoned graceful handoff
+  // (Relay.HANDOFF_GRACE_MS, ~8s) - the old 60s cadence was fine for its
+  // original job (idle rate-limit buckets) but would leave a room's
+  // surviving peers waiting up to a minute past a failed handoff before
+  // being told the room is actually gone.
+  const sweeper = setInterval(() => relay.sweep(), 2_000);
   sweeper.unref?.();
 
   const http = createServer((req, res) => {

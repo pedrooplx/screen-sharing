@@ -240,3 +240,147 @@ describe('Relay', () => {
     expect(rt).toMatchObject({ connId: 42, isBinary: true });
   });
 });
+
+describe('graceful handoff', () => {
+  const handoff = Buffer.from([T.HANDOFF]);
+
+  it('does not touch peers or the room by itself', () => {
+    const relay = new Relay();
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    const peer = new FakeSocket();
+    relay.onHello(peer, hello('peer'));
+    peer.sent.length = 0;
+
+    relay.onMessage(host, handoff);
+
+    expect(peer.sent).toHaveLength(0);
+    expect(peer.closed).toBe(false);
+    expect(relay.roomCount).toBe(1);
+  });
+
+  it('lets a new host claim the room instead of rejecting room_exists', () => {
+    const relay = new Relay();
+    const host = new FakeSocket('host-ip');
+    relay.onHello(host, hello('host'));
+    const peer = new FakeSocket('peer-ip');
+    relay.onHello(peer, hello('peer'));
+    peer.sent.length = 0;
+
+    relay.onMessage(host, handoff);
+    const successor = new FakeSocket('successor-ip');
+    relay.onHello(successor, hello('host'));
+
+    // READY comes first, then a PEER_UP for the still-connected survivor
+    expect(successor.sent[0]?.[0]).toBe(T.READY);
+    expect((successor.json(0) as { hostToken: string }).hostToken).toMatch(/^[0-9a-f]{32}$/);
+    expect(relay.roomCount).toBe(1);
+    expect(successor.sent.some((b) => b[0] === T.PEER_UP)).toBe(true);
+  });
+
+  it('does not tear the room down when the old host disconnects mid-handoff', () => {
+    const relay = new Relay();
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    const peer = new FakeSocket();
+    relay.onHello(peer, hello('peer'));
+    peer.sent.length = 0;
+
+    relay.onMessage(host, handoff);
+    relay.onClose(host);
+
+    expect(peer.sent).toHaveLength(0);
+    expect(peer.closed).toBe(false);
+    expect(relay.roomCount).toBe(1);
+  });
+
+  it('routes a claiming host to survivors, and a later peer join still works', () => {
+    const relay = new Relay();
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    const peer = new FakeSocket();
+    relay.onHello(peer, hello('peer')); // connId 1
+
+    relay.onMessage(host, handoff);
+    const successor = new FakeSocket();
+    relay.onHello(successor, hello('host'));
+    successor.sent.length = 0;
+
+    // the survivor's traffic now reaches the new host
+    relay.onMessage(peer, dataToPeer(true, Buffer.from('hello')));
+    const toHost = decodeDataFromHost(successor.sent.at(-1)!)!;
+    expect(toHost.connId).toBe(1);
+    expect(toHost.payload.toString()).toBe('hello');
+
+    // a brand new peer can still join the claimed room normally
+    const carol = new FakeSocket();
+    relay.onHello(carol, hello('peer'));
+    expect(carol.lastType()).toBe(T.READY);
+    expect(relay.peerCount('deadbeef')).toBe(2);
+  });
+
+  it('tears the room down via sweep() once the grace window elapses unclaimed', () => {
+    let now = 0;
+    const relay = new Relay(
+      {
+        maxRooms: 100,
+        maxPeersPerRoom: 24,
+        roomCreatesPerWindow: 10,
+        joinsPerWindow: 40,
+        rateWindowMs: 60_000,
+      },
+      () => now,
+    );
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    const peer = new FakeSocket();
+    relay.onHello(peer, hello('peer'));
+    peer.sent.length = 0;
+
+    relay.onMessage(host, handoff);
+    relay.onClose(host);
+    relay.sweep(); // still well inside the grace window
+    expect(relay.roomCount).toBe(1);
+    expect(peer.closed).toBe(false);
+
+    now += 9_000; // past HANDOFF_GRACE_MS
+    relay.sweep();
+
+    expect(relay.roomCount).toBe(0);
+    expect(peer.lastType()).toBe(T.HOST_GONE);
+    expect(peer.closed).toBe(true);
+  });
+
+  it('a peer sending HANDOFF is ignored (only the host may hand off)', () => {
+    const relay = new Relay();
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    const peer = new FakeSocket();
+    relay.onHello(peer, hello('peer'));
+
+    relay.onMessage(peer, handoff);
+    const impostor = new FakeSocket();
+    relay.onHello(impostor, hello('host'));
+
+    // no handoff was actually armed, so a second host is still rejected
+    expect((impostor.json() as { reason: string }).reason).toBe('room_exists');
+  });
+
+  it('ignores HANDOFF from a stale host reference no longer owning the room', () => {
+    const relay = new Relay();
+    const host = new FakeSocket();
+    relay.onHello(host, hello('host'));
+    relay.onHello(new FakeSocket(), hello('peer'));
+
+    relay.onMessage(host, handoff);
+    const successor = new FakeSocket();
+    relay.onHello(successor, hello('host')); // claims the room
+
+    // the original host is now stale; its own (late) HANDOFF must not affect
+    // the room the successor just took over
+    relay.onMessage(host, handoff);
+    const impostor = new FakeSocket();
+    relay.onHello(impostor, hello('host'));
+    expect((impostor.json() as { reason: string }).reason).toBe('room_exists');
+  });
+});

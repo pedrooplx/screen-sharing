@@ -172,6 +172,14 @@ export interface PeerHandshakeConfig {
   readonly roomId: Uint8Array;
   /** derive `w` once the host's argonParams are known */
   readonly deriveW: (params: ArgonParams) => Uint8Array | Promise<Uint8Array>;
+  /**
+   * Per-step timeout (default 10s). Shortened by RoomSession while
+   * re-homing to a host that just took over via a graceful handoff - the
+   * usual 10s is fine when a host is already known-good, but a survivor
+   * retrying every 10s while the successor is still coming up would make a
+   * handoff feel far slower than it is.
+   */
+  readonly timeoutMs?: number;
 }
 
 export async function runPeerHandshake(
@@ -185,7 +193,7 @@ export async function runPeerHandshake(
     roomId: bytesToHex(cfg.roomId),
   });
 
-  const ack = await waitFor(conn, 'hello_ack');
+  const ack = await waitFor(conn, 'hello_ack', cfg.timeoutMs);
   if (ack.protoVersion !== PROTOCOL_VERSION) {
     throw new HandshakeError('host protocol version mismatch', 'version_mismatch');
   }
@@ -204,7 +212,7 @@ export async function runPeerHandshake(
   const peer = peerBegin(w, binding, hexToBytes(ack.sid));
   conn.sendHandshake({ type: 'pake_peer', ya: bytesToHex(peer.ya) });
 
-  const pakeHost = await waitFor(conn, 'pake_host');
+  const pakeHost = await waitFor(conn, 'pake_host', cfg.timeoutMs);
   let result;
   try {
     result = peer.finish(hexToBytes(pakeHost.yb), hexToBytes(pakeHost.macHost));

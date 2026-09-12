@@ -241,6 +241,54 @@ describe('signaling session (Phase 1)', () => {
     ws.terminate();
   });
 
+  it("transferHost() names a successor and does not sever survivors' connections", async () => {
+    const { server, port } = await startServer();
+    const a = await connectPeer(port, 'alice'); // joinSeq 1 -> designated heir
+    await a.connect();
+    const b = await connectPeer(port, 'bob');
+    await b.connect();
+    await settle();
+
+    let aClosed = false;
+    a.on('close', () => {
+      aClosed = true;
+    });
+    const transfer = waitEvent<{ successorPeerId: string; epoch: number }>(
+      a,
+      'host-transfer',
+    );
+    void server.transferHost(50);
+
+    const { successorPeerId, epoch } = await transfer;
+    expect(successorPeerId).toBe(
+      a.roster.find((e) => e.nickname === 'alice')?.peerId,
+    );
+    expect(epoch).toBe(1);
+
+    // unlike close()/crash(), this must NOT kick survivors off their own
+    // transport - RoomSession relies on that socket surviving to re-home to
+    // whoever claims the room next (over the relay; this test only proves
+    // the local signaling layer holds up its end - it never sends `bye` or
+    // closes the peer's Connection, unlike the plain close() path below).
+    await new Promise((r) => setTimeout(r, 20)); // well before the 50ms grace
+    expect(aClosed).toBe(false);
+
+    await new Promise((r) => setTimeout(r, 60)); // past the grace period
+    expect(aClosed).toBe(false); // still never closed, even once the source is gone
+
+    // the source really did close: a fresh connection to the same port fails
+    await expect(openWs(port)).rejects.toThrow();
+  });
+
+  it('transferHost() with nobody to hand off to just closes normally', async () => {
+    // the host alone, no peers -> successionOrder() is empty -> falls back
+    // to the plain close() path instead of broadcasting a handoff nobody
+    // could receive.
+    const { server, port } = await startServer();
+    await server.transferHost(50);
+    await expect(openWs(port)).rejects.toThrow();
+  });
+
   it('sets inboundVerified when the peer port is reachable', async () => {
     // a stand-in for the peer's own inbound listener
     const listener: Server = createServer();

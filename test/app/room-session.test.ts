@@ -20,6 +20,14 @@ afterEach(async () => {
 
 const settle = () => new Promise((r) => setTimeout(r, 80));
 
+async function waitUntil(pred: () => boolean, timeoutMs = 8_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error('waitUntil timed out');
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 function track(s: RoomSession): { last: SessionSnapshot } {
   const box = { last: s.snapshot() };
   s.on('update', (snap) => (box.last = snap));
@@ -160,6 +168,72 @@ describe('RoomSession (over the relay)', () => {
     await peer.leave();
     await settle();
     expect(hostBox.last.roster.map((e) => e.nickname)).toEqual(['host']);
+  });
+
+  describe('graceful host handoff', () => {
+    it('promotes the earliest-joined survivor when the host leaves; the other reconnects to it', async () => {
+      const host = await RoomSession.host({
+        nickname: 'host',
+        relayUrl: relay.url,
+        argonParams: MIN_ARGON_PARAMS,
+      });
+      track(host);
+      const alice = await RoomSession.join({
+        nickname: 'alice',
+        relayUrl: relay.url,
+        argonParams: MIN_ARGON_PARAMS,
+      });
+      const aliceBox = track(alice);
+      const bob = await RoomSession.join({ nickname: 'bob', relayUrl: relay.url });
+      const bobBox = track(bob);
+      await settle();
+      expect(host.snapshot().roster).toHaveLength(3);
+
+      await host.leave();
+
+      // alice joined first among the peers -> successionOrder() names her.
+      // bob's OWN phase was already 'in-room' before any of this (rehome()
+      // deliberately never changes it away, to avoid bouncing the UI to the
+      // Lobby mid-handoff - see RoomSession#rehome) so it can't signal
+      // completion here; his roster reflecting both participants can.
+      await waitUntil(
+        () => aliceBox.last.isHost === true && aliceBox.last.phase === 'hosting',
+      );
+      await waitUntil(() => bobBox.last.roster.length === 2);
+
+      expect(aliceBox.last.roster.map((e) => e.nickname).sort()).toEqual([
+        'alice',
+        'bob',
+      ]);
+      expect(bobBox.last.roster.map((e) => e.nickname).sort()).toEqual([
+        'alice',
+        'bob',
+      ]);
+      expect(bobBox.last.isHost).toBe(false);
+    }, 10_000);
+
+    it('ends the room for the survivor when there is nobody left to take over', async () => {
+      const host = await RoomSession.host({
+        nickname: 'host',
+        relayUrl: relay.url,
+        argonParams: MIN_ARGON_PARAMS,
+      });
+      track(host);
+      const alice = await RoomSession.join({ nickname: 'alice', relayUrl: relay.url });
+      sessions.push(alice);
+      await settle();
+
+      await alice.leave(); // alice leaves first - host is now alone
+      await settle();
+      expect(host.snapshot().roster).toHaveLength(1);
+
+      await host.leave(); // no survivors to hand off to -> plain close
+      await settle();
+
+      await expect(
+        RoomSession.join({ nickname: 'nobody-home', relayUrl: relay.url }),
+      ).rejects.toThrow(/no_such_room/i);
+    });
   });
 
   it('ends the peer session when the relay itself goes away', async () => {

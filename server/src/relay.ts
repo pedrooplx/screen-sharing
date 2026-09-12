@@ -27,6 +27,10 @@ import {
   T,
 } from './wire.js';
 
+/** how long a room stays reserved for a successor after its host hands off
+ *  gracefully (HANDOFF) before falling back to the normal teardown */
+const HANDOFF_GRACE_MS = 8_000;
+
 export interface Socket {
   send(data: Buffer): void;
   close(code?: number, reason?: string): void;
@@ -51,10 +55,13 @@ export const DEFAULT_LIMITS: RelayLimits = {
 
 interface Room {
   readonly roomId: string;
-  readonly hostToken: string;
+  hostToken: string;
   host: Socket;
   readonly peers: Map<number, Socket>;
   nextConnId: number;
+  /** set by HANDOFF; a fresh host HELLO for this roomId claims the room
+   *  instead of being rejected with room_exists until this passes */
+  handoffDeadline: number | undefined;
 }
 
 interface Attached {
@@ -119,12 +126,32 @@ export class Relay {
         }
         return;
       }
+      if (type === T.HANDOFF) {
+        // Only the room's current host can start a handoff - a stale
+        // reference (already superseded by an earlier claim) is a no-op.
+        if (room.host === socket) {
+          room.handoffDeadline = this.#now() + HANDOFF_GRACE_MS;
+        }
+        return;
+      }
       const frame = decodeDataFromHost(data);
       if (!frame) return;
       room.peers.get(frame.connId)?.send(
         dataToPeer(frame.isBinary, frame.payload),
       );
     } else {
+      // A handoff is pending: room.host is the departing host, still
+      // technically connected (it lingers until its own close arrives or the
+      // grace window lapses - see onClose/sweep below) but no longer a valid
+      // destination. Forwarding to it anyway would hand a plaintext `hello`
+      // (a survivor's fresh handshake attempt, see RoomSession#rehome) to a
+      // Connection object that already upgraded to encrypted framing on its
+      // original handshake - a confusing protocol violation on arrival, not
+      // a clean rejection. Silently drop instead: RoomSession#rehome waits a
+      // short beat before its one handshake attempt specifically so this
+      // window is rarely hit, but a survivor that reacts before the
+      // successor's claim still fails clean instead of crashing anything.
+      if (room.handoffDeadline !== undefined) return;
       const frame = decodeDataFromPeer(data);
       if (!frame || att.connId === undefined) return;
       room.host.send(dataToHost(att.connId, frame.isBinary, frame.payload));
@@ -139,12 +166,21 @@ export class Relay {
     if (!room) return;
 
     if (att.role === 'host') {
-      // host gone -> tear the room down (no reconnect grace in v1)
-      for (const peer of room.peers.values()) {
-        peer.send(hostGone());
-        peer.close(1001, 'host gone');
+      if (room.host !== socket) {
+        // a stale reference: this host was already superseded by a
+        // successor's claim (#hostHello below) - nothing to do here, the
+        // room and its peers now belong to that new host.
+        return;
       }
-      this.#rooms.delete(att.roomId);
+      if (room.handoffDeadline !== undefined) {
+        // graceful handoff in flight (HANDOFF already received): leave the
+        // room and its peers alone and let the grace window (sweep()) or a
+        // successor's claim resolve it, instead of tearing down right away.
+        return;
+      }
+      // host gone with no handoff pending -> tear the room down immediately,
+      // exactly as before (a crash or an abrupt disconnect, not a leave()).
+      this.#teardownRoom(room);
     } else if (att.connId !== undefined) {
       room.peers.delete(att.connId);
       room.host.send(peerDown(att.connId));
@@ -154,6 +190,14 @@ export class Relay {
   // --- helpers ------------------------------------------------------
 
   #hostHello(socket: Socket, hello: Hello): void {
+    const existing = this.#rooms.get(hello.roomId);
+    if (
+      existing?.handoffDeadline !== undefined &&
+      this.#now() < existing.handoffDeadline
+    ) {
+      this.#claimHandoff(socket, existing);
+      return;
+    }
     if (this.#rooms.size >= this.#limits.maxRooms) {
       this.#kick(socket, 'server_full');
       return;
@@ -173,9 +217,37 @@ export class Relay {
       host: socket,
       peers: new Map(),
       nextConnId: 1,
+      handoffDeadline: undefined,
     });
     this.#attached.set(socket, { role: 'host', roomId: hello.roomId });
     socket.send(ready({ hostToken }));
+  }
+
+  /**
+   * A new host HELLO arrived while `room` is in its post-HANDOFF grace
+   * window: treat it as the successor claiming the room instead of a
+   * conflicting create. Not gated by maxRooms/rate limits - the room already
+   * exists, this only changes who owns it. Every peer still connected gets a
+   * fresh PEER_UP to the new host socket, exactly as if they had just
+   * dialed in, so the new host's SignalingServer re-handshakes each one.
+   */
+  #claimHandoff(socket: Socket, room: Room): void {
+    room.host = socket;
+    room.handoffDeadline = undefined;
+    room.hostToken = randomBytes(16).toString('hex');
+    this.#attached.set(socket, { role: 'host', roomId: room.roomId });
+    socket.send(ready({ hostToken: room.hostToken }));
+    for (const connId of room.peers.keys()) {
+      socket.send(peerUp(connId));
+    }
+  }
+
+  #teardownRoom(room: Room): void {
+    for (const peer of room.peers.values()) {
+      peer.send(hostGone());
+      peer.close(1001, 'host gone');
+    }
+    this.#rooms.delete(room.roomId);
   }
 
   #peerHello(socket: Socket, hello: Hello): void {
@@ -220,9 +292,22 @@ export class Relay {
     return true;
   }
 
-  /** drop stale rate buckets (call periodically) */
+  /**
+   * Drop stale rate buckets, and finish off any room whose graceful-handoff
+   * grace window (HANDOFF_GRACE_MS) elapsed with nobody claiming it - nobody
+   * was reachable, or the intended successor never came online. Call this
+   * periodically; how periodically bounds how long a failed handoff leaves
+   * peers waiting before they're told the room is actually gone (see
+   * server/src/index.ts - this needs to run far more often than the
+   * rate-bucket cleanup alone would justify).
+   */
   sweep(): void {
     const now = this.#now();
+    for (const room of this.#rooms.values()) {
+      if (room.handoffDeadline !== undefined && now >= room.handoffDeadline) {
+        this.#teardownRoom(room);
+      }
+    }
     for (const [ip, bucket] of this.#rate) {
       const idle =
         bucket.creates.every((t) => now - t >= this.#limits.rateWindowMs) &&

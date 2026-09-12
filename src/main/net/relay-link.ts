@@ -18,6 +18,7 @@ import {
   decodeRelayFrame,
   encodeDataH,
   encodeDataP,
+  encodeHandoff,
   encodeHello,
   encodeKick,
   encodePing,
@@ -123,6 +124,62 @@ function connectWs(url: string, timeoutMs: number): Promise<WebSocket> {
   });
 }
 
+/**
+ * Resolved/rejected by whichever permanent message handler sees the READY or
+ * REJECT frame that answers this connection's HELLO.
+ *
+ * Both link classes used to wait for READY with a SEPARATE, temporary
+ * `ws.on('message', ...)` listener, torn down as soon as READY arrived, with
+ * the class's own permanent listener only attached afterward (once the
+ * `open()` promise resumed - at least one microtask later). That gap is
+ * invisible for a plain room creation, where READY is the only thing the
+ * relay ever sends unprompted. It is not invisible for a graceful-handoff
+ * claim (server/src/relay.ts's #claimHandoff): the relay sends READY and
+ * then one PEER_UP per still-connected survivor, back to back, synchronously,
+ * in the same call. If both arrive in the same WebSocket read - entirely
+ * normal - the temporary listener catches READY and removes itself; the
+ * permanent one doesn't exist yet; PEER_UP lands with no listener at all and
+ * is silently gone (confirmed by hand: a promoted host that stops timing out
+ * on `waitFor hello_ack` the moment this was fixed). The fix is structural,
+ * not a delay: construct the link and attach its ONE permanent handler
+ * before sending HELLO at all, so there is no interval, ever, during which a
+ * frame can arrive uncaught.
+ */
+interface PendingOpen {
+  resolve(frame: { connId?: number; hostToken?: string }): void;
+  reject(err: Error): void;
+}
+
+function waitPendingOpen(
+  ws: WebSocket,
+  timeoutMs: number,
+  setPending: (p: PendingOpen | undefined) => void,
+): Promise<{ connId?: number; hostToken?: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      setPending(undefined);
+      reject(new RelayLinkError('relay never sent READY'));
+    }, timeoutMs);
+    setPending({
+      resolve: (frame) => {
+        clearTimeout(timer);
+        setPending(undefined);
+        resolve(frame);
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        setPending(undefined);
+        reject(err);
+      },
+    });
+    ws.once('close', () => {
+      clearTimeout(timer);
+      setPending(undefined);
+      reject(new RelayLinkError('relay closed before READY'));
+    });
+  });
+}
+
 // --- peer ----------------------------------------------------------------
 
 export class RelayPeerLink implements Transport {
@@ -130,6 +187,7 @@ export class RelayPeerLink implements Transport {
   #h: Handlers = {};
   #closed = false;
   #keepalive: NodeJS.Timeout;
+  #pendingOpen: PendingOpen | undefined;
 
   private constructor(ws: WebSocket) {
     this.#ws = ws;
@@ -137,7 +195,13 @@ export class RelayPeerLink implements Transport {
       if (!isBinary) return;
       const frame = decodeRelayFrame(data);
       if (!frame) return;
-      if (frame.t === 'data') {
+      if (frame.t === 'ready') {
+        this.#pendingOpen?.resolve(frame);
+      } else if (frame.t === 'reject') {
+        this.#pendingOpen?.reject(
+          new RelayLinkError(`relay rejected: ${frame.reason}`, frame.reason),
+        );
+      } else if (frame.t === 'data') {
         this.#h.onMessage?.(Buffer.from(frame.payload), frame.isBinary);
       } else if (frame.t === 'host_gone') {
         this.#fail(1001, 'host gone');
@@ -160,9 +224,11 @@ export class RelayPeerLink implements Transport {
     timeoutMs = OPEN_TIMEOUT_MS,
   ): Promise<RelayPeerLink> {
     const ws = await connectWs(url, timeoutMs);
+    const link = new RelayPeerLink(ws);
+    const ready = waitPendingOpen(ws, timeoutMs, (p) => (link.#pendingOpen = p));
     ws.send(encodeHello({ role: 'peer', roomId, app: appVersion }), { binary: true });
-    await waitReady(ws, timeoutMs);
-    return new RelayPeerLink(ws);
+    await ready;
+    return link;
   }
 
   get closed(): boolean {
@@ -254,22 +320,48 @@ export class RelayHostLink implements ConnectionSource {
   #ws: WebSocket;
   #peers = new Map<number, VirtualTransport>();
   #onConnection: ((t: Transport, ip: string) => void) | undefined;
+  /**
+   * peer_up's whose VirtualTransport exists but couldn't be handed to a
+   * caller yet because onConnection() isn't wired up. Only possible right
+   * after open(): SignalingServer#listen() calls onConnection() the moment
+   * open()'s promise resolves, but that resumption is a microtask, and the
+   * relay can send peer_up frames synchronously right behind READY in the
+   * same call (#claimHandoff, for every survivor of a graceful handoff) -
+   * both arrive in the same synchronous message-handling pass, before any
+   * microtask (including open()'s own awaiter) gets a turn. Buffer instead
+   * of dropping; flush the moment onConnection() is actually set.
+   */
+  #pendingPeers: VirtualTransport[] = [];
   #onClosed: ((reason: string) => void) | undefined;
   #closed = false;
   #keepalive: NodeJS.Timeout;
-  readonly hostToken: string;
+  #pendingOpen: PendingOpen | undefined;
+  hostToken = '';
 
-  private constructor(ws: WebSocket, hostToken: string) {
+  private constructor(ws: WebSocket) {
     this.#ws = ws;
-    this.hostToken = hostToken;
     ws.on('message', (data: Buffer, isBinary: boolean) => {
       if (!isBinary) return;
       const frame = decodeRelayFrame(data);
       if (!frame) return;
+      if (frame.t === 'ready') {
+        this.#pendingOpen?.resolve(frame);
+        return;
+      }
+      if (frame.t === 'reject') {
+        this.#pendingOpen?.reject(
+          new RelayLinkError(`relay rejected: ${frame.reason}`, frame.reason),
+        );
+        return;
+      }
       if (frame.t === 'peer_up') {
         const vt = new VirtualTransport(frame.connId, this);
         this.#peers.set(frame.connId, vt);
-        this.#onConnection?.(vt, 'relay');
+        if (this.#onConnection) {
+          this.#onConnection(vt, 'relay');
+        } else {
+          this.#pendingPeers.push(vt);
+        }
       } else if (frame.t === 'peer_down') {
         this.#peers.get(frame.connId)?._dropped('peer left');
         this.#peers.delete(frame.connId);
@@ -292,9 +384,12 @@ export class RelayHostLink implements ConnectionSource {
     timeoutMs = OPEN_TIMEOUT_MS,
   ): Promise<RelayHostLink> {
     const ws = await connectWs(url, timeoutMs);
+    const link = new RelayHostLink(ws);
+    const ready = waitPendingOpen(ws, timeoutMs, (p) => (link.#pendingOpen = p));
     ws.send(encodeHello({ role: 'host', roomId, app: appVersion }), { binary: true });
-    const ready = await waitReady(ws, timeoutMs);
-    return new RelayHostLink(ws, ready.hostToken ?? '');
+    const frame = await ready;
+    link.hostToken = frame.hostToken ?? '';
+    return link;
   }
 
   get closed(): boolean {
@@ -302,9 +397,26 @@ export class RelayHostLink implements ConnectionSource {
   }
   onConnection(cb: (transport: Transport, ip: string) => void): void {
     this.#onConnection = cb;
+    if (this.#pendingPeers.length > 0) {
+      const pending = this.#pendingPeers;
+      this.#pendingPeers = [];
+      for (const vt of pending) cb(vt, 'relay');
+    }
   }
   onClosed(cb: (reason: string) => void): void {
     this.#onClosed = cb;
+  }
+  /**
+   * Tell the relay this host is leaving gracefully: hold the room open for a
+   * successor instead of tearing it down the instant this link closes (see
+   * server/src/relay.ts's HANDOFF handling). Does not close anything itself -
+   * follow with a normal close() once the app-level handoff broadcast has had
+   * a moment to reach peers over their still-open connections.
+   */
+  handoff(): void {
+    if (this.#ws.readyState === this.#ws.OPEN) {
+      this.#ws.send(encodeHandoff(), { binary: true });
+    }
   }
   async close(): Promise<void> {
     if (this.#closed) return;
@@ -337,44 +449,4 @@ export class RelayHostLink implements ConnectionSource {
     this.#peers.clear();
     this.#onClosed?.(reason);
   }
-}
-
-// --- shared -----------------------------------------------------------
-
-function waitReady(
-  ws: WebSocket,
-  timeoutMs: number,
-): Promise<{ connId?: number; hostToken?: string }> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new RelayLinkError('relay never sent READY'));
-    }, timeoutMs);
-    const onMessage = (data: Buffer, isBinary: boolean) => {
-      if (!isBinary) return;
-      const frame = decodeRelayFrame(data);
-      if (!frame) return;
-      if (frame.t === 'ready') {
-        cleanup();
-        resolve({
-          ...(frame.connId !== undefined ? { connId: frame.connId } : {}),
-          ...(frame.hostToken !== undefined ? { hostToken: frame.hostToken } : {}),
-        });
-      } else if (frame.t === 'reject') {
-        cleanup();
-        reject(new RelayLinkError(`relay rejected: ${frame.reason}`, frame.reason));
-      }
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new RelayLinkError('relay closed before READY'));
-    };
-    const cleanup = () => {
-      clearTimeout(timer);
-      ws.off('message', onMessage);
-      ws.off('close', onClose);
-    };
-    ws.on('message', onMessage);
-    ws.on('close', onClose);
-  });
 }

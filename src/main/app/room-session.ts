@@ -143,13 +143,26 @@ const MAX_ENTER_ATTEMPTS = 3;
 // from an earlier successful-but-presumed-timed-out attempt, or gets the
 // survivor's whole relay socket kicked for a protocol violation (confirmed
 // by hand, the hard way). There is no safe way to retry on this connId; the
-// fix is to not need to. A survivor reacts to host_transfer as soon as it
-// arrives, normally well before the successor has actually finished
-// claiming the room, so REHOME_INITIAL_DELAY_MS waits that race out first -
-// the relay also drops (never forwards) a peer's traffic while a handoff is
-// still pending (relay.ts), so even a too-early attempt fails clean instead
-// of reaching anything half-set-up.
-const REHOME_INITIAL_DELAY_MS = 500;
+// fix is to not need to.
+//
+// A survivor reacts to host_transfer as soon as it arrives, which can well
+// be BEFORE the successor has actually finished claiming the room - an
+// earlier version of this code waited a fixed REHOME_INITIAL_DELAY_MS
+// (500ms) to let that race resolve, tuned against the local test relay's
+// near-zero latency. It failed against the real deployed relay: a fresh
+// RelayHostLink.open() over a real WAN link (new TLS handshake, Argon2id,
+// a round trip to Render) routinely takes longer than 500ms, so the
+// survivor's one attempt fired early, got silently dropped by the relay's
+// pending-handoff guard (relay.ts), and then just sat there until its own
+// handshake timeout - confirmed live against production before this was
+// understood. Fixed structurally instead of by tuning the number up:
+// RelayPeerLink#onHandoffReady() fires off an explicit HOST_CLAIMED the
+// relay sends the moment #claimHandoff actually runs, so #rehome() knows
+// precisely when to try rather than estimating it. REHOME_MAX_WAIT_MS is
+// only the give-up bound if that signal never arrives at all (nobody ever
+// claims - matches the relay's own HANDOFF_GRACE_MS, plus slack for the
+// teardown message to arrive).
+const REHOME_MAX_WAIT_MS = 9_000;
 const REHOME_HANDSHAKE_TIMEOUT_MS = 6_000;
 
 export class RoomSession extends EventEmitter<RoomSessionEvents> {
@@ -563,8 +576,9 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
    * Stay a peer, but re-home to whoever just claimed the host slot - over
    * the SAME relay transport (#peerLink), never closed during a graceful
    * handoff specifically so this can happen without dialing the relay
-   * again. Exactly one handshake attempt - see REHOME_INITIAL_DELAY_MS
-   * above for why.
+   * again. Exactly one handshake attempt - see REHOME_MAX_WAIT_MS above for
+   * why - made the instant the relay confirms someone actually claimed the
+   * room (RelayPeerLink#onHandoffReady), not after a guessed delay.
    */
   async #rehome(epoch: number): Promise<void> {
     const link = this.#peerLink;
@@ -577,8 +591,28 @@ export class RoomSession extends EventEmitter<RoomSessionEvents> {
 
     this.#notice = 'Trocando de host…';
     this.#emit();
-    await new Promise((r) => setTimeout(r, REHOME_INITIAL_DELAY_MS));
+    const claimed = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), REHOME_MAX_WAIT_MS);
+      link.onHandoffReady(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+      // the transport's onClose slot is free - #client.detach() only stopped
+      // the heartbeat, it never claimed this (the old, now-defunct
+      // Connection's registration is exactly what detach() leaves behind,
+      // and nothing still needs to hear it). If the relay tears the room
+      // down instead of anyone claiming it (nobody eligible, or sweep()
+      // expired the grace window - relay.ts), this fires with no claim.
+      link.onClose(() => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
     if (this.#leaving) return;
+    if (!claimed) {
+      this.#roomEndedAfterFailedHandoff('ninguém assumiu a sala a tempo');
+      return;
+    }
 
     try {
       const client = new SignalingClient({

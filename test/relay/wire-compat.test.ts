@@ -111,4 +111,10 @@ describe('wire compat: server/src/wire.ts <-> src/main/net/relay-wire.ts', () =>
     expect(serverWire.isHandoff(buf)).toBe(true);
     expect(serverWire.isHandoff(clientWire.encodePing())).toBe(false);
   });
+
+  it('server HOST_CLAIMED decodes on the client', () => {
+    const buf = serverWire.hostClaimed();
+    expect(buf).toEqual(Buffer.from([serverWire.T.HOST_CLAIMED]));
+    expect(clientWire.decodeRelayFrame(buf)).toEqual({ t: 'host_claimed' });
+  });
 });

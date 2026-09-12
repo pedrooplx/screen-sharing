@@ -276,6 +276,11 @@ describe('graceful handoff', () => {
     expect((successor.json(0) as { hostToken: string }).hostToken).toMatch(/^[0-9a-f]{32}$/);
     expect(relay.roomCount).toBe(1);
     expect(successor.sent.some((b) => b[0] === T.PEER_UP)).toBe(true);
+
+    // the survivor's OWN socket gets told directly, so it knows precisely
+    // when to retry instead of guessing (RoomSession#rehome) - it must not
+    // have to wait for anything routed through the new host first.
+    expect(peer.sent.some((b) => b[0] === T.HOST_CLAIMED)).toBe(true);
   });
 
   it('does not tear the room down when the old host disconnects mid-handoff', () => {

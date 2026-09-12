@@ -18,6 +18,7 @@ export const T = {
   HOST_GONE: 0x06,
   KICK: 0x07,
   HANDOFF: 0x08,
+  HOST_CLAIMED: 0x09,
   DATA_H: 0x10,
   DATA_P: 0x11,
   PING: 0x20,
@@ -53,6 +54,7 @@ export type RelayControl =
   | { t: 'peer_up'; connId: number }
   | { t: 'peer_down'; connId: number }
   | { t: 'host_gone' }
+  | { t: 'host_claimed' }
   | { t: 'pong' }
   | { t: 'data'; connId?: number; isBinary: boolean; payload: Buffer };
 
@@ -91,6 +93,8 @@ export function decodeRelayFrame(buf: Buffer): RelayControl | null {
     }
     case T.HOST_GONE:
       return { t: 'host_gone' };
+    case T.HOST_CLAIMED:
+      return { t: 'host_claimed' };
     case T.PONG:
       return { t: 'pong' };
     case T.DATA_H: {

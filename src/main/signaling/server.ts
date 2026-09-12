@@ -174,11 +174,30 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
       await this.close();
       return;
     }
+    // Mark closing NOW, not only once #closeForHandoff() runs after the
+    // grace wait below: every survivor was just told to move on, so this
+    // host must not send any of them anything else in the meantime. It
+    // still can (and does, right below) - #closing only gates #onPeerGone's
+    // roster_update and #handleConnection's rejection of brand-new joins,
+    // never broadcast()/sendTo() directly. Without this, a heartbeat ping
+    // or a roster_update from a survivor disconnecting mid-window (the
+    // promoted successor detaches almost immediately) lands as a stray
+    // encrypted frame on a survivor's shared relay transport while its
+    // fresh post-handoff Connection is mid-handshake; Connection#upgrade
+    // queues an early binary frame assuming it's meant for the new
+    // session's keys, and fails to decrypt it because it was actually
+    // encrypted under this (dying) session's keys instead - confirmed the
+    // hard way, live.
+    this.#closing = true;
     this.broadcast({
       type: 'host_transfer',
       successorPeerId: successor,
       epoch: this.#epoch + 1,
     });
+    for (const link of this.#links.values()) {
+      if (link.heartbeatTimer) clearInterval(link.heartbeatTimer);
+      link.heartbeat?.stop();
+    }
     await new Promise((r) => setTimeout(r, graceMs));
     await this.#closeForHandoff();
   }
@@ -456,6 +475,16 @@ export class SignalingServer extends EventEmitter<SignalingServerEvents> {
   }
 
   #onPeerGone(peerId: string): void {
+    // Already closing (transferHost()'s handoff window, or close()/crash()):
+    // don't broadcast a roster_update to the remaining links. A survivor
+    // reacting to a graceful handoff may already be mid-handshake on a
+    // brand new Connection over its (shared, reused) relay transport - an
+    // unrelated encrypted frame landing there right now would be queued as
+    // an "arrived early" envelope and fail to decrypt once that new
+    // handshake's own keys are installed (see transferHost() for the full
+    // story). Nothing needs this host's roster/#links bookkeeping to stay
+    // current in that window either - it's being torn down regardless.
+    if (this.#closing) return;
     const link = this.#links.get(peerId);
     if (link?.heartbeatTimer) clearInterval(link.heartbeatTimer);
     link?.heartbeat?.stop();

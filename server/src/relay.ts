@@ -18,6 +18,7 @@ import {
   decodeDataFromHost,
   decodeDataFromPeer,
   decodeKick,
+  hostClaimed,
   hostGone,
   peerDown,
   peerUp,
@@ -229,7 +230,12 @@ export class Relay {
    * conflicting create. Not gated by maxRooms/rate limits - the room already
    * exists, this only changes who owns it. Every peer still connected gets a
    * fresh PEER_UP to the new host socket, exactly as if they had just
-   * dialed in, so the new host's SignalingServer re-handshakes each one.
+   * dialed in, so the new host's SignalingServer re-handshakes each one -
+   * and its OWN socket gets HOST_CLAIMED, telling it to retry its handshake
+   * now instead of guessing how long the claim would take (RoomSession
+   * only gets one attempt per claim - see #rehome there for why - so it
+   * needs to know precisely when to make it, not estimate it from a fixed
+   * delay that assumed near-zero relay latency).
    */
   #claimHandoff(socket: Socket, room: Room): void {
     room.host = socket;
@@ -237,8 +243,9 @@ export class Relay {
     room.hostToken = randomBytes(16).toString('hex');
     this.#attached.set(socket, { role: 'host', roomId: room.roomId });
     socket.send(ready({ hostToken: room.hostToken }));
-    for (const connId of room.peers.keys()) {
+    for (const [connId, peer] of room.peers) {
       socket.send(peerUp(connId));
+      peer.send(hostClaimed());
     }
   }
 

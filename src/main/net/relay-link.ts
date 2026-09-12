@@ -188,6 +188,15 @@ export class RelayPeerLink implements Transport {
   #closed = false;
   #keepalive: NodeJS.Timeout;
   #pendingOpen: PendingOpen | undefined;
+  #onHandoffReady: (() => void) | undefined;
+  /**
+   * True if HOST_CLAIMED arrived before RoomSession#rehome() got around to
+   * calling onHandoffReady() - the same kind of gap #pendingPeers closes for
+   * RelayHostLink below, just for a one-shot signal instead of a queue: the
+   * relay can send this the instant a successor claims, which is often
+   * sooner than the survivor has finished reacting to host_transfer.
+   */
+  #handoffAlreadyClaimed = false;
 
   private constructor(ws: WebSocket) {
     this.#ws = ws;
@@ -205,6 +214,9 @@ export class RelayPeerLink implements Transport {
         this.#h.onMessage?.(Buffer.from(frame.payload), frame.isBinary);
       } else if (frame.t === 'host_gone') {
         this.#fail(1001, 'host gone');
+      } else if (frame.t === 'host_claimed') {
+        if (this.#onHandoffReady) this.#onHandoffReady();
+        else this.#handoffAlreadyClaimed = true;
       }
     });
     ws.on('close', (code: number, reason: Buffer) =>
@@ -257,6 +269,19 @@ export class RelayPeerLink implements Transport {
   }
   onError(cb: (err: Error) => void): void {
     this.#h.onError = cb;
+  }
+  /**
+   * Fires once, the moment a graceful handoff's successor claims the room
+   * (HOST_CLAIMED) - RoomSession#rehome() waits on this instead of guessing
+   * a fixed delay before its one allowed handshake attempt. If the claim
+   * already happened before this was called, fires immediately.
+   */
+  onHandoffReady(cb: () => void): void {
+    this.#onHandoffReady = cb;
+    if (this.#handoffAlreadyClaimed) {
+      this.#handoffAlreadyClaimed = false;
+      cb();
+    }
   }
 
   #fail(code: number, reason: string): void {

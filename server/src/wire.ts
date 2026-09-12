@@ -14,6 +14,10 @@
  *   0x07 KICK       host->relay:   [0x07][connId u32 BE]  (drop one peer)
  *   0x08 HANDOFF    host->relay, no body (graceful "I'm about to leave, hold
  *                   this room open for a successor" - see Relay#onHandoff)
+ *   0x09 HOST_CLAIMED  relay->peer, no body ("the successor just claimed the
+ *                   room - retry your handshake now" - sent to every still-
+ *                   connected peer the instant #claimHandoff runs, so a
+ *                   survivor never has to guess how long the claim will take)
  *   0x10 DATA_H     host<->relay:  [0x10][connId u32 BE][isBinary u8][payload]
  *   0x11 DATA_P     peer<->relay:  [0x11][isBinary u8][payload]
  *   0x20 PING / 0x21 PONG   either direction, no body (relay-level keep-alive)
@@ -32,6 +36,7 @@ export const T = {
   HOST_GONE: 0x06,
   KICK: 0x07,
   HANDOFF: 0x08,
+  HOST_CLAIMED: 0x09,
   DATA_H: 0x10,
   DATA_P: 0x11,
   PING: 0x20,
@@ -78,6 +83,7 @@ export const reject = (reason: RejectReason) => jsonFrame(T.REJECT, { reason });
 export const peerUp = (connId: number) => jsonFrame(T.PEER_UP, { connId });
 export const peerDown = (connId: number) => jsonFrame(T.PEER_DOWN, { connId });
 export const hostGone = () => Buffer.from([T.HOST_GONE]);
+export const hostClaimed = () => Buffer.from([T.HOST_CLAIMED]);
 export const pong = () => Buffer.from([T.PONG]);
 
 /** host -> relay -> peer: strip the connId, deliver as DATA_P */

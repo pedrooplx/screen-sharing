@@ -1,0 +1,68 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  ## Propósito
+  - Compartilhamento de tela P2P entre várias pessoas, estilo Discord: mesmo executável em todos os PCs, quem cria a sala vira o host (mídia) daquela sessão.
+  - Topologia estrela: o host é um mini-SFU nativo (processo `main`), toda a mídia passa por ele; nunca no renderer.
+  - Alvo: grupos pequenos de amigos/colegas em redes domésticas diferentes, sem VPN, sem infraestrutura própria.
+
+  ## Stack técnica
+  - Electron 44 + electron-vite 5 + React 19 + TypeScript (strict). Dois tsconfig na raiz: `tsconfig.json` (Node: main/preload/shared/test) e `tsconfig.web.json` (renderer).
+  - Mídia: `werift` (WebRTC puro JS, sem rebuild nativo no empacotamento) — mini-SFU próprio (`src/main/sfu/`), não usa mediasoup/janus.
+  - Sinalização: `ws` sobre WebSocket + `zod` para todo o protocolo (`src/shared/protocol.ts`).
+  - Criptografia: `@noble/curves`/`@noble/hashes` — CPace (PAKE) sobre ristretto255, Argon2id, HKDF, AES-256-GCM. Zero libs de auth prontas.
+  - Testes: vitest (`npm test`), inclui um relé real em memória (não mocka rede).
+  - Empacotamento: electron-builder → NSIS + portable, Windows x64 only.
+  - `server/` é um **pacote Node separado**, com seu próprio `package.json`/`node_modules`/`tsconfig.json` — deploy independente do app Electron.
+
+  ## Arquitetura
+  - Dois planos independentes: controle (WebSocket via relé, ~centenas de B/s) e mídia (WebRTC P2P via ICE, Mbps) — essa separação é a decisão central do design.
+  - `Connection` roda sobre um `Transport` abstrato; `SignalingServer`/`SignalingClient` sobre um `ConnectionSource`/`Transport` injetado — local (`ws`, só testes) ou o relé (`RelayHostLink`/`RelayPeerLink`, produção). Isso é o que permitiu trocar de "host abre porta" pra "relé hospedado" sem reescrever a sinalização.
+  - Mapeamento de `src/`: `main/crypto` (CPace/Argon2id/AEAD), `main/net` (frames, Transport, cliente do relé, STUN), `main/signaling` (server/client), `main/app` (`RoomSession` — orquestra tudo, sala única fixa), `main/sfu` (mini-SFU werift), `preload` (contextBridge), `renderer` (UI React pt-BR). Detalhe completo: README "Estrutura em src/".
+
+  ## Deploy
+  - **Relé de sinalização**: hospedado no Render (free tier), já em produção em `wss://erros-share-relay.onrender.com` (= `DEFAULT_RELAY_URL`, `src/main/net/relay-config.ts`). Deploy via Blueprint (`server/render.yaml`, Root Directory = `server`); porta via `process.env.PORT`. Dorme após ~15min ocioso, ~30-50s pra acordar — a UI mostra "acordando o servidor…". `git push` no repo redeploya o relé sozinho (Render auto-deploy); o app Electron NÃO é redeployado junto — precisa rebuild manual (ver abaixo).
+  - **App Electron**: NÃO é hospedado. Distribuição = instalador NSIS Windows x64 gerado manualmente (`npm run dist:win` → `release/erros-share-Setup-<versão>.exe` + versão portable). Sem assinatura de código, sem auto-update — quem quiser a versão nova precisa rodar o build de novo e reinstalar.
+  - **Mídia (WebRTC)**: nunca passa por servidor nenhum — P2P direto via STUN público (hole punching ICE). TURN é ponto de extensão opcional apontado pelo usuário; nada hospedado por padrão.
+
+  ## Decisões de produto intencionais — NÃO são bugs a "corrigir" sem pedido explícito
+  - **Sala única, fixa, sem código** (v0.5): removeu N-salas concorrentes com código Base32 por pedido do usuário. `FIXED_ROOM_ID`/`FIXED_CODE_SALT` em `room-session.ts`.
+  - **Sem senha, um único botão "Entrar"** (v0.6): `RoomSession.enter()` hospeda ou entra sozinho. CPace/Argon2id continuam rodando por baixo, mas contra `FIXED_PASSWORD` pública — **zero controle de acesso é a troca deliberadamente aceita**, não uma falha de segurança a "consertar" reintroduzindo senha/código.
+  - **Handoff gracioso de host só cobre saída voluntária** (v0.7, `leave()`/botão "Sair"): o relé segura a sala numa janela de graça (`HANDOFF`, 8s) e um sucessor reivindica. Failover automático **disparado por crash** (heartbeat + `heir_probe` UDP anti-split-brain) foi implementado, testado, e está **deliberadamente parcado** em `parked/` — não apagar, não "religar" sem pedido explícito; reviver exigiria mudanças no relé (ver `parked/README.md`, docs/DESIGN.md §18.5).
+  - **Windows 11 apenas** — arquitetura permite portar, mas macOS/Linux não são implementados nem pedidos.
+  - **Sem auto-update** — distribuição é só o instalador manual.
+  - **Sem microfone, sem webcam, sem gravação, sem histórico de sala.** Chat de texto fora de escopo (ponto de extensão via data channel existe, sem UI).
+  - **Áudio é sempre do sistema inteiro** (loopback WASAPI), nunca por app/janela — não é uma limitação a resolver com um addon nativo; o contorno documentado é configuração nativa do Windows 11 (Volume do app e preferências de dispositivo), não uma feature do app.
+  - **Host vê mídia em claro por design (v1)** — E2EE via Insertable Streams é ponto de extensão existente (`roomMediaKey`), deliberadamente não ligado.
+  - **Sem simulcast** — um assinante com internet ruim degrada a qualidade pra todo mundo naquele fluxo; aceito, não é bug.
+  - **NAT simétrico sem TURN** é o único cenário de rede que ainda impede o uso (mídia não conecta); a sinalização não depende de porta nenhuma desde o pivô do relé.
+  - **Um único monitor por transmissão.**
+  - **Idioma**: UI em pt-BR, código e comentários em inglês — manter em qualquer código novo.
+
+  ## Convenções de workflow
+  - `npm run typecheck` roda três tsc separados: raiz (Node), web (renderer), e `--prefix server` — os três precisam passar.
+  - `npm test` sobe um relé real em memória por teste, não mocka a rede — testes de integração de verdade.
+  - `scripts/patch-binary-data.mjs` roda no `postinstall`: corrige um bug de empacotamento do `werift` (dependência vendoriza módulos privados de um jeito que o coletor do electron-builder descarta) — não remover sem entender docs/DESIGN.md §0, desvios 9-10.
+  - `parked/` fica fora dos dois tsconfig e do vitest.config — código completo e testado, mas deliberadamente não compilado nem rodado.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+rules:
+  proposal:
+    - "Se a mudança proposta reverte, enfraquece ou contradiz qualquer item da seção 'Decisões de produto intencionais' no contexto do projeto, marque isso explicitamente como uma reversão deliberada e pergunte ao usuário antes de prosseguir."
+  design:
+    - "Mesma regra: uma decisão de design que reverte algo listado em 'Decisões de produto intencionais' precisa ser sinalizada como tal, não assumida silenciosamente como correção."
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
